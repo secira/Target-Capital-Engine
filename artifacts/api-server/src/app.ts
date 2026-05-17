@@ -2,6 +2,7 @@ import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
+import execProxyRouter from "./routes/exec-proxy";
 import { logger } from "./lib/logger";
 
 const app: Express = express();
@@ -26,6 +27,11 @@ app.use(
   }),
 );
 app.use(cors());
+
+// Mount the execution-engine passthrough BEFORE the JSON parser so the raw
+// HMAC-signed body is preserved byte-for-byte.
+app.use("/api/exec", execProxyRouter);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

@@ -66,6 +66,26 @@ artifacts/tc-execution-engine/
 - Broker credentials stored encrypted with Fernet using `BROKER_MASTER_KEY` — same key as Target Capital.
 - Error taxonomy: `auth_error` (401), `validation_error` (422), `broker_error` (502), `halted` (503), `not_found` (404).
 
+## Cross-Repl testing (Target Capital → this engine)
+
+The engine listens on port 5000 but isn't registered as a Replit artifact, so it
+isn't reachable from outside this Repl directly. The Node `api-server` artifact
+(routed publicly at `/api`) proxies through to it at `/api/exec/*` while
+preserving the raw HMAC-signed body.
+
+- `GET  https://<repl-domain>/api/exec/healthz` → engine `GET /healthz`
+- `POST https://<repl-domain>/api/exec/v1/orders` → engine `POST /v1/orders`
+- `GET|PUT https://<repl-domain>/api/exec/v1/halt` → engine halt switch
+- etc.
+
+Wire it up in the Target Capital Repl:
+1. Set `EXECUTION_ENGINE_URL = https://<this-repl-domain>/api/exec`
+2. Set `EXECUTION_HMAC_SECRET` to the same value in both Repls
+3. Target Capital signs as before — the proxy is transparent
+
+Override the proxy upstream with `EXEC_ENGINE_URL` env var on the api-server if
+the engine ever moves to a different host/port.
+
 ## Admin UI
 
 Browser dashboard at `/admin` so you don't have to curl from the shell.
