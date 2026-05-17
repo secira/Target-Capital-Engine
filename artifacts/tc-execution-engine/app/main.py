@@ -67,12 +67,11 @@ def create_app() -> FastAPI:
         logger.info("tc-execution-engine starting up…")
         db_url = os.environ.get("DATABASE_URL", "")
         if db_url:
-            try:
-                run_startup_self_test()
-            except Exception as exc:
-                logger.error("DB startup self-test FAILED: %s — continuing anyway", exc)
+            # Hard-fail: if self-test raises, the exception propagates and
+            # uvicorn/gunicorn will exit — engine does not accept traffic.
+            run_startup_self_test()
         else:
-            logger.warning("DATABASE_URL not set — skipping DB self-test")
+            logger.warning("DATABASE_URL not set — skipping DB self-test (dev only)")
 
     @app.on_event("shutdown")
     async def on_shutdown() -> None:

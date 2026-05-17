@@ -76,22 +76,34 @@ def run_startup_self_test() -> None:
         logger.error("DB self-test [SELECT 1]: FAILED — %s", exc)
         raise
 
-    # Check 2: tc_exec user must NOT have DELETE on users
+    # Check 2: tc_exec user must NOT have DELETE on users.
+    # If the DELETE succeeds the engine raises and refuses to start — this is
+    # non-negotiable: a misconfigured DB user is a data-integrity risk.
+    delete_passed = False
     try:
         with engine.connect() as conn:
             conn.execute(text("DELETE FROM users WHERE 1=0"))
             conn.rollback()
-        logger.error(
-            "DB self-test [DELETE users]: FAILED — tc_exec user has DELETE on users! "
-            "Revoke immediately."
-        )
+        # Reaching here means the DELETE was not denied — hard failure.
+        delete_passed = True
     except ProgrammingError as exc:
-        # expected: permission denied
+        # Expected path: "permission denied for table users"
         logger.info(
             "DB self-test [DELETE users]: PASSED (permission denied as expected): %s",
             exc.orig,
         )
     except Exception as exc:
+        # Any other error (e.g. table doesn't exist yet) is treated as a warning,
+        # not a hard failure — the table may not be migrated yet in dev.
         logger.warning(
-            "DB self-test [DELETE users]: could not confirm permission — %s", exc
+            "DB self-test [DELETE users]: inconclusive — %s "
+            "(acceptable in dev before schema migration)",
+            exc,
+        )
+
+    if delete_passed:
+        raise PermissionError(
+            "SECURITY: tc_exec DB user has DELETE permission on 'users'. "
+            "Revoke it immediately and restart. "
+            "Engine startup aborted."
         )

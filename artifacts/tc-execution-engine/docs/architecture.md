@@ -65,8 +65,8 @@ which MUST fail with "permission denied".
 ## HMAC Protocol
 
 ```
-message  = timestamp_unix_seconds + "." + raw_request_body_bytes
-signature = HMAC-SHA256(message, EXECUTION_HMAC_SECRET).hex()
+message   = timestamp_unix_seconds + "." + raw_request_body_bytes
+signature = HMAC-SHA256(message, secret).hex()
 ```
 
 Headers required on every mutable endpoint:
@@ -74,6 +74,22 @@ Headers required on every mutable endpoint:
 - `X-TC-Timestamp` — Unix epoch seconds (string)
 - `X-TC-Request-ID` — UUID string (optional, recommended)
 - `X-TC-Idempotency` — idempotency key (optional)
+
+### Secret rotation
+
+Set both vars during the transition window:
+
+| Env var                     | Purpose                              |
+|-----------------------------|--------------------------------------|
+| `EXECUTION_HMAC_SECRET`     | Current (outgoing) key               |
+| `EXECUTION_HMAC_SECRET_NEXT`| Next (incoming) key — optional       |
+
+The engine accepts a valid signature from **either** key.  
+Rotation steps:
+1. Generate new key: `openssl rand -hex 32`
+2. Set `EXECUTION_HMAC_SECRET_NEXT` on the engine (Railway / SSM).
+3. Update Target Capital to sign with the new key and deploy.
+4. Once all traffic is on the new key: remove `EXECUTION_HMAC_SECRET`, rename `EXECUTION_HMAC_SECRET_NEXT` → `EXECUTION_HMAC_SECRET`.
 
 ## Idempotency
 
