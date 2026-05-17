@@ -36,6 +36,9 @@ artifacts/tc-execution-engine/
     routers/
       health.py              # GET /healthz, GET /version, GET|PUT /v1/halt
       orders.py              # POST /v1/orders, POST /v1/orders/{id}/cancel, GET /v1/orders/{id}
+      admin.py               # /admin/api/* — status, trades, halt, test-order (token-gated)
+    static/
+      index.html             # /admin dashboard (vanilla JS, dark theme)
   shared/
     db.py                    # DB connection + startup self-test
     models.py                # SQLAlchemy ORM models (User, BrokerAccount, Trade, BrokerOrder, TradingSignal)
@@ -62,6 +65,15 @@ artifacts/tc-execution-engine/
 - DB self-test at startup: SELECT 1 (must pass) + DELETE FROM users WHERE 1=0 (must fail with permission denied).
 - Broker credentials stored encrypted with Fernet using `BROKER_MASTER_KEY` — same key as Target Capital.
 - Error taxonomy: `auth_error` (401), `validation_error` (422), `broker_error` (502), `halted` (503), `not_found` (404).
+
+## Admin UI
+
+Browser dashboard at `/admin` so you don't have to curl from the shell.
+
+- Open port 5000 from the Replit **Ports** panel, then navigate to `/admin`.
+- Sign in with your `ADMIN_TOKEN` value (stored in sessionStorage for the tab only).
+- Features: live engine/DB/config status, halt toggle with reason, recent trades table, and a "place test order" form that signs HMAC server-side and POSTs to `/v1/orders` (exercises the full pipeline end-to-end).
+- All admin endpoints (`/admin/api/*`) require the `X-TC-Admin-Token` header.
 
 ## Product
 

@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>tc-execution-engine — Admin</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #14171f;
+    --panel-2: #1c2030;
+    --border: #262b3a;
+    --text: #e6e8ee;
+    --muted: #8a93a6;
+    --green: #34d399;
+    --red: #f87171;
+    --amber: #fbbf24;
+    --blue: #60a5fa;
+    --accent: #818cf8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+  header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  header h1 .v { color: var(--muted); font-weight: 400; margin-left: 8px; font-size: 13px; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
+    border-radius: 999px; font-size: 12px; font-weight: 500; }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .badge.ok    { background: rgba(52,211,153,.12); color: var(--green); }
+  .badge.ok    .dot { background: var(--green); }
+  .badge.bad   { background: rgba(248,113,113,.12); color: var(--red); }
+  .badge.bad   .dot { background: var(--red); }
+  .badge.warn  { background: rgba(251,191,36,.12); color: var(--amber); }
+  .badge.warn  .dot { background: var(--amber); }
+  .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px; }
+  .card h2 { margin: 0 0 14px 0; font-size: 13px; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+  .col-4  { grid-column: span 4; }
+  .col-6  { grid-column: span 6; }
+  .col-8  { grid-column: span 8; }
+  .col-12 { grid-column: span 12; }
+  @media (max-width: 800px) { .col-4, .col-6, .col-8 { grid-column: span 12; } }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; font-size: 13px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; word-break: break-all; }
+  button { background: var(--accent); color: #0b0d12; border: none; padding: 8px 14px;
+    border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 13px; }
+  button:hover { filter: brightness(1.1); }
+  button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+  button.danger { background: var(--red); color: #0b0d12; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  input, select, textarea { background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+    font: inherit; width: 100%; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .form-grid .full { grid-column: span 2; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 11px; letter-spacing: .04em; }
+  td.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .status-pill { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; }
+  .status-pill.placed   { background: rgba(96,165,250,.15); color: var(--blue); }
+  .status-pill.filled   { background: rgba(52,211,153,.15); color: var(--green); }
+  .status-pill.rejected { background: rgba(248,113,113,.15); color: var(--red); }
+  .status-pill.cancelled{ background: rgba(138,147,166,.15); color: var(--muted); }
+  .status-pill.pending  { background: rgba(251,191,36,.15); color: var(--amber); }
+  pre { background: #0a0c11; border: 1px solid var(--border); padding: 12px; border-radius: 8px;
+    font-size: 12px; overflow-x: auto; max-height: 280px; }
+  .toast { position: fixed; right: 20px; bottom: 20px; padding: 12px 16px;
+    border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border);
+    box-shadow: 0 8px 24px rgba(0,0,0,.4); max-width: 380px; }
+  .toast.ok  { border-color: var(--green); }
+  .toast.bad { border-color: var(--red); }
+  .gate { max-width: 420px; margin: 80px auto; }
+  .gate .card { padding: 28px; }
+  .muted-text { color: var(--muted); font-size: 12.5px; }
+  .stat { font-size: 28px; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<!-- ============================================================ -->
+<!-- Token gate                                                    -->
+<!-- ============================================================ -->
+<div id="gate" class="gate" style="display:none">
+  <div class="card">
+    <h2>Admin sign-in</h2>
+    <p class="muted-text">
+      Enter the value of the <code>ADMIN_TOKEN</code> env var. It's stored only
+      in this browser tab (sessionStorage) and is never logged.
+    </p>
+    <div style="margin: 14px 0;">
+      <input id="tokenInput" type="password" placeholder="ADMIN_TOKEN" />
+    </div>
+    <button onclick="saveToken()">Unlock</button>
+    <div id="gateError" style="color: var(--red); font-size: 12px; margin-top: 10px;"></div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- Dashboard                                                    -->
+<!-- ============================================================ -->
+<div id="app" class="container" style="display:none">
+
+  <header>
+    <h1>
+      tc-execution-engine
+      <span class="v" id="versionLabel"></span>
+    </h1>
+    <div class="row">
+      <span id="haltBadge" class="badge ok"><span class="dot"></span>running</span>
+      <button class="secondary" onclick="refresh()">↻ Refresh</button>
+      <button class="secondary" onclick="signOut()">Sign out</button>
+    </div>
+  </header>
+
+  <div class="grid">
+
+    <!-- Status -->
+    <div class="card col-4">
+      <h2>Engine status</h2>
+      <div class="kv">
+        <div class="k">Version</div>     <div class="v" id="kvVersion">—</div>
+        <div class="k">Halted</div>      <div class="v" id="kvHalted">—</div>
+        <div class="k">Halt reason</div> <div class="v" id="kvHaltReason">—</div>
+        <div class="k">Database</div>    <div class="v" id="kvDb">—</div>
+      </div>
+    </div>
+
+    <!-- Config -->
+    <div class="card col-4">
+      <h2>Configuration</h2>
+      <div class="kv">
+        <div class="k">HMAC secret</div>          <div class="v" id="kvHmac">—</div>
+        <div class="k">HMAC next (rotation)</div> <div class="v" id="kvHmacNext">—</div>
+        <div class="k">Broker master key</div>    <div class="v" id="kvBmk">—</div>
+        <div class="k">Admin token</div>          <div class="v" id="kvAdmin">—</div>
+      </div>
+    </div>
+
+    <!-- Counts -->
+    <div class="card col-4">
+      <h2>Last 24h</h2>
+      <div class="stat" id="kvTradeCount">—</div>
+      <div class="muted-text">trades placed</div>
+    </div>
+
+    <!-- Halt control -->
+    <div class="card col-6">
+      <h2>Halt control</h2>
+      <p class="muted-text" style="margin-top:0">
+        When halted, every <code>POST /v1/orders</code> returns 503. Use this in
+        an emergency to stop all order placement.
+      </p>
+      <div style="margin: 12px 0;">
+        <label>Reason (optional, shown on GET /v1/halt)</label>
+        <input id="haltReasonInput" type="text" placeholder="e.g. broker outage" />
+      </div>
+      <div class="row">
+        <button class="danger" onclick="setHalt(true)">⏸  Halt engine</button>
+        <button onclick="setHalt(false)">▶  Resume engine</button>
+      </div>
+    </div>
+
+    <!-- Test order -->
+    <div class="card col-6">
+      <h2>Place a test order</h2>
+      <p class="muted-text" style="margin-top:0">
+        Signed server-side with <code>EXECUTION_HMAC_SECRET</code> and POSTed to
+        <code>/v1/orders</code> — exercises the full pipeline.
+      </p>
+      <div class="form-grid">
+        <div class="full">
+          <label>Broker account</label>
+          <select id="brokerSelect"><option value="">— select —</option></select>
+        </div>
+        <div>
+          <label>Symbol</label>
+          <input id="oSymbol" value="INFY" />
+        </div>
+        <div>
+          <label>Exchange</label>
+          <select id="oExchange">
+            <option>NSE</option><option>BSE</option><option>NFO</option>
+            <option>BFO</option><option>MCX</option><option>CDS</option>
+          </select>
+        </div>
+        <div>
+          <label>Security ID</label>
+          <input id="oSecurityId" value="1594" />
+        </div>
+        <div>
+          <label>Side</label>
+          <select id="oSide"><option>BUY</option><option>SELL</option></select>
+        </div>
+        <div>
+          <label>Quantity</label>
+          <input id="oQty" type="number" min="1" value="1" />
+        </div>
+        <div>
+          <label>Order type</label>
+          <select id="oOrderType">
+            <option>MARKET</option><option>LIMIT</option>
+            <option>SL</option><option>SLM</option>
+          </select>
+        </div>
+        <div>
+          <label>Product</label>
+          <select id="oProduct">
+            <option>CNC</option><option>MIS</option><option>NRML</option>
+            <option>MTF</option><option>CO</option><option>BO</option>
+          </select>
+        </div>
+        <div>
+          <label>Price (for LIMIT)</label>
+          <input id="oPrice" type="number" step="0.05" value="0" />
+        </div>
+        <div class="full">
+          <button onclick="placeTestOrder()" id="placeBtn">Place test order</button>
+        </div>
+      </div>
+      <div id="orderResult" style="margin-top: 14px;"></div>
+    </div>
+
+    <!-- Trades -->
+    <div class="card col-12">
+      <h2>Recent trades (last 50)</h2>
+      <div id="tradesError" class="muted-text" style="margin-bottom:8px"></div>
+      <div style="overflow-x:auto">
+        <table id="tradesTable">
+          <thead>
+            <tr>
+              <th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th>
+              <th>Type</th><th>Status</th><th>Broker order</th><th>Error</th>
+            </tr>
+          </thead>
+          <tbody><tr><td colspan="8" class="muted-text">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div id="toast" class="toast" style="display:none"></div>
+
+<script>
+// ----------------------------------------------------------------------
+// Token handling
+// ----------------------------------------------------------------------
+const TOKEN_KEY = "tc_admin_token";
+
+function getToken() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
+function showGate() { document.getElementById("gate").style.display = "block";
+                     document.getElementById("app").style.display  = "none"; }
+function showApp()  { document.getElementById("gate").style.display = "none";
+                     document.getElementById("app").style.display  = "block"; }
+function signOut()  { sessionStorage.removeItem(TOKEN_KEY); showGate(); }
+
+async function saveToken() {
+  const t = document.getElementById("tokenInput").value.trim();
+  if (!t) return;
+  sessionStorage.setItem(TOKEN_KEY, t);
+  // Validate by hitting /status
+  try {
+    const r = await fetch("/admin/api/status", { headers: { "X-TC-Admin-Token": t }});
+    if (r.status === 401) {
+      document.getElementById("gateError").textContent = "Invalid token.";
+      sessionStorage.removeItem(TOKEN_KEY);
+      return;
+    }
+    if (!r.ok) {
+      document.getElementById("gateError").textContent = "Engine returned " + r.status;
+      sessionStorage.removeItem(TOKEN_KEY);
+      return;
+    }
+    showApp();
+    refresh();
+  } catch (e) {
+    document.getElementById("gateError").textContent = "Network error: " + e.message;
+  }
+}
+
+// ----------------------------------------------------------------------
+// API helpers
+// ----------------------------------------------------------------------
+async function api(path, opts = {}) {
+  const token = getToken();
+  const headers = Object.assign({ "X-TC-Admin-Token": token,
+                                  "Content-Type": "application/json" }, opts.headers || {});
+  const resp = await fetch(path, Object.assign({}, opts, { headers }));
+  if (resp.status === 401) { signOut(); throw new Error("Unauthorized"); }
+  const text = await resp.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
+  if (!resp.ok) {
+    const err = new Error(json.detail || ("HTTP " + resp.status));
+    err.payload = json; err.status = resp.status;
+    throw err;
+  }
+  return json;
+}
+
+function toast(message, kind = "ok") {
+  const el = document.getElementById("toast");
+  el.textContent = message;
+  el.className = "toast " + kind;
+  el.style.display = "block";
+  clearTimeout(window._toastTimer);
+  window._toastTimer = setTimeout(() => el.style.display = "none", 4000);
+}
+
+function setText(id, v) { document.getElementById(id).textContent = v ?? "—"; }
+function envBadge(set) { return set ? '<span class="badge ok"><span class="dot"></span>set</span>'
+                                    : '<span class="badge bad"><span class="dot"></span>missing</span>'; }
+function envBadgeOpt(set) { return set ? '<span class="badge ok"><span class="dot"></span>set</span>'
+                                       : '<span class="badge warn"><span class="dot"></span>not set</span>'; }
+
+// ----------------------------------------------------------------------
+// Render
+// ----------------------------------------------------------------------
+async function loadStatus() {
+  const s = await api("/admin/api/status");
+  setText("versionLabel", "v" + s.version);
+  setText("kvVersion", s.version);
+  setText("kvHalted", s.halted ? "yes" : "no");
+  setText("kvHaltReason", s.halt_reason || "—");
+
+  document.getElementById("kvDb").innerHTML = s.db_connected
+    ? '<span class="badge ok"><span class="dot"></span>connected</span>'
+        + (s.db_error ? '<div class="muted-text" style="margin-top:4px">' + s.db_error + '</div>' : '')
+    : '<span class="badge bad"><span class="dot"></span>error</span>'
+        + (s.db_error ? '<div class="muted-text" style="margin-top:4px">' + s.db_error + '</div>' : '');
+
+  document.getElementById("kvHmac").innerHTML     = envBadge(s.hmac_secret_set);
+  document.getElementById("kvHmacNext").innerHTML = envBadgeOpt(s.hmac_next_secret_set);
+  document.getElementById("kvBmk").innerHTML      = envBadge(s.broker_master_key_set);
+  document.getElementById("kvAdmin").innerHTML    = envBadge(s.admin_token_set);
+
+  setText("kvTradeCount", s.trade_count_24h);
+
+  // Halt badge
+  const hb = document.getElementById("haltBadge");
+  if (s.halted) { hb.className = "badge bad";  hb.innerHTML = '<span class="dot"></span>HALTED'; }
+  else          { hb.className = "badge ok";   hb.innerHTML = '<span class="dot"></span>running'; }
+}
+
+async function loadTrades() {
+  const tbody = document.querySelector("#tradesTable tbody");
+  const errEl = document.getElementById("tradesError");
+  errEl.textContent = "";
+  try {
+    const { trades, error } = await api("/admin/api/trades?limit=50");
+    if (error) errEl.textContent = error;
+    if (!trades.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="muted-text">No trades yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = trades.map(t => `
+      <tr>
+        <td>${new Date(t.created_at).toLocaleString()}</td>
+        <td><strong>${t.symbol}</strong> <span class="muted-text">${t.exchange}</span></td>
+        <td>${t.side}</td>
+        <td>${t.quantity}</td>
+        <td>${t.order_type}</td>
+        <td><span class="status-pill ${t.status}">${t.status}</span></td>
+        <td class="mono">${t.broker_order_id || '—'} <span class="muted-text">${t.broker_type || ''}</span></td>
+        <td class="muted-text">${t.error_message || ''}</td>
+      </tr>
+    `).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" class="muted-text">Could not load trades: ${e.message}</td></tr>`;
+  }
+}
+
+async function loadBrokerAccounts() {
+  const sel = document.getElementById("brokerSelect");
+  try {
+    const { accounts, error } = await api("/admin/api/broker-accounts");
+    if (error) { sel.innerHTML = '<option value="">— DB unavailable —</option>'; return; }
+    if (!accounts.length) {
+      sel.innerHTML = '<option value="">— no broker accounts —</option>';
+      return;
+    }
+    sel.innerHTML = '<option value="">— select —</option>' +
+      accounts.map(a =>
+        `<option value="${a.broker_account_id}|${a.user_id}">${a.email || '?'} · ${a.broker_type} · ${a.client_id}</option>`
+      ).join("");
+  } catch (e) {
+    sel.innerHTML = '<option value="">— error —</option>';
+  }
+}
+
+// ----------------------------------------------------------------------
+// Actions
+// ----------------------------------------------------------------------
+async function setHalt(halted) {
+  const reason = document.getElementById("haltReasonInput").value.trim() || null;
+  try {
+    await api("/admin/api/halt", {
+      method: "POST",
+      body: JSON.stringify({ halted, reason }),
+    });
+    toast(halted ? "Engine halted." : "Engine resumed.", "ok");
+    loadStatus();
+  } catch (e) {
+    toast("Halt toggle failed: " + e.message, "bad");
+  }
+}
+
+async function placeTestOrder() {
+  const sel = document.getElementById("brokerSelect").value;
+  if (!sel) { toast("Select a broker account first.", "bad"); return; }
+  const [broker_account_id, user_id] = sel.split("|");
+
+  const body = {
+    user_id,
+    broker_account_id,
+    symbol:           document.getElementById("oSymbol").value.trim(),
+    exchange:         document.getElementById("oExchange").value,
+    security_id:      document.getElementById("oSecurityId").value.trim(),
+    transaction_type: document.getElementById("oSide").value,
+    quantity:         parseInt(document.getElementById("oQty").value, 10) || 1,
+    order_type:       document.getElementById("oOrderType").value,
+    product_type:     document.getElementById("oProduct").value,
+    price:            parseFloat(document.getElementById("oPrice").value) || 0,
+    tag:              "admin-ui",
+  };
+
+  const btn = document.getElementById("placeBtn");
+  btn.disabled = true; btn.textContent = "Placing…";
+  const out = document.getElementById("orderResult");
+  out.innerHTML = "";
+
+  try {
+    const r = await api("/admin/api/test-order", { method: "POST", body: JSON.stringify(body) });
+    const klass = r.http_status >= 200 && r.http_status < 300 ? "ok" : "bad";
+    toast("Engine responded " + r.http_status, klass);
+    out.innerHTML = `<div class="muted-text">HTTP ${r.http_status} · request_id ${r.request_id}</div>`
+                  + `<pre>${JSON.stringify(r.response, null, 2)}</pre>`;
+    loadTrades(); loadStatus();
+  } catch (e) {
+    toast("Order failed: " + e.message, "bad");
+    out.innerHTML = `<pre>${JSON.stringify(e.payload || { error: e.message }, null, 2)}</pre>`;
+  } finally {
+    btn.disabled = false; btn.textContent = "Place test order";
+  }
+}
+
+async function refresh() {
+  await Promise.all([loadStatus(), loadTrades(), loadBrokerAccounts()]);
+}
+
+// ----------------------------------------------------------------------
+// Boot
+// ----------------------------------------------------------------------
+(async function init() {
+  const token = getToken();
+  if (!token) { showGate(); return; }
+  try {
+    // verify
+    await api("/admin/api/status");
+    showApp();
+    refresh();
+    setInterval(loadStatus, 10000); // status polls every 10s
+  } catch (e) {
+    signOut();
+  }
+})();
+</script>
+</body>
+</html>

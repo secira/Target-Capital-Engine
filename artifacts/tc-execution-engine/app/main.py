@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
-from app.routers import health, orders
+from app.routers import admin, health, orders
 from shared.db import run_startup_self_test
+
+_STATIC_DIR = Path(__file__).parent / "static"
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +60,25 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(orders.router)
+    app.include_router(admin.router)
+
+    # ------------------------------------------------------------------
+    # Admin dashboard (static HTML at /admin)
+    # ------------------------------------------------------------------
+
+    @app.get("/admin", include_in_schema=False)
+    async def admin_index():
+        index_file = _STATIC_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(index_file)
+        return JSONResponse({"error": "admin UI not bundled"}, status_code=404)
+
+    @app.get("/", include_in_schema=False)
+    async def root_redirect():
+        return RedirectResponse(url="/admin")
+
+    if _STATIC_DIR.exists():
+        app.mount("/admin/static", StaticFiles(directory=_STATIC_DIR), name="admin-static")
 
     # ------------------------------------------------------------------
     # Startup / shutdown events
