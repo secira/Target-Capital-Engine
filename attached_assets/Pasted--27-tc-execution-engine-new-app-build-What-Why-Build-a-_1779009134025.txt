@@ -1,0 +1,36 @@
+#27 - tc-execution-engine — new app build
+What & Why
+Build a brand-new standalone Python service called tc-execution-engine. Its only job: receive HMAC-signed order requests from the Target Capital app, place the order with the chosen Indian broker, write the fill back to the shared database, and return the result. Deployed first to Railway (for easy testing alongside Target Capital), later moved to AWS EC2 with a static Elastic IP so brokers can whitelist it.
+
+This task is designed to be handed verbatim to Replit Agent inside a freshly-created blank Python Repl. The Target Capital codebase is NOT in this new Repl — the engine is fully self-contained except for sharing one Postgres database and one HMAC secret with Target Capital.
+
+Done looks like
+A new Repl named tc-execution-engine exists, pushed to its own GitHub repo, deployed on Railway, reachable at https://tc-execution-engine-<handle>.up.railway.app (or custom subdomain).
+GET /healthz returns {"status":"ok","version":"<git sha>"}.
+GET /version returns the deployed git SHA.
+POST /v1/orders, POST /v1/orders/{id}/cancel, GET /v1/orders/{id} accept HMAC-signed requests, validate them, place the order with the chosen broker (Dhan first — others stubbed), and return a structured response.
+GET /v1/halt returns current halted state; PUT /v1/halt (admin token protected) toggles it. When halted, every POST /v1/orders returns {"error":"halted"} without contacting a broker.
+Idempotency: posting the same X-TC-Idempotency key within 24h returns the cached response without placing a second order.
+HMAC verification: any request with a missing/wrong signature or a timestamp more than 60s off wall-clock is rejected with 401.
+Engine connects to the same Railway Postgres as Target Capital using a scoped tc_exec DB user (read users/broker_account/trading_signal, insert/update trade/broker_order only).
+Engine reads HMAC secret, DB DSN, and broker master key from env vars (Replit Secrets in dev/Railway; AWS SSM later in EC2).
+A scripts/deploy_ec2.sh script exists for future EC2 deployment, but EC2 provisioning itself is OUT OF SCOPE for this task.
+An end-to-end smoke test: place a Dhan paper order from a curl command, get back the broker order ref, see the row in the shared Postgres trade table.
+Out of scope
+AWS account setup, EC2 provisioning, Elastic IP allocation, nginx/Let's Encrypt — all done after Railway testing is green.
+Broker IP-whitelisting paperwork (manual; done in each broker's portal once EC2 IP exists).
+Multi-instance HA, NLB, second region, DR.
+WebSocket order updates (poll-based status is fine for Phase 1).
+Data API calls — option chain, LTP, quotes — these stay on Target Capital. The engine never fetches market data.
+The Target Capital-side proxy client and feature flag — that lives in the sister task running in the Target Capital Repl.
+Holdings/positions sync workers — those keep running on Target Capital.
+A second broker beyond Dhan in Phase 1 (Zerodha, Angel, Upstox can be stubbed and filled in later).
+Steps
+Scaffold the FastAPI app — Create folders: app/ (routers, middleware, main), shared/ (models, brokers), scripts/, tests/, docs/. Add requirements.txt with fastapi, uvicorn, gunicorn, sqlalchemy, psycopg2-binary, cryptography, python-dotenv, pydantic, requests, and the Dhan SDK. Add main.py exposing the FastAPI app for gunicorn. Bind to port 5000 for Replit, port 8080 for Railway (read from PORT env var).
+HMAC verification middleware — FastAPI dependency that reads X-TC-Signature, X-TC-Timestamp, rejects requests older than 60s, recomputes HMAC-SHA256 over timestamp + raw body using EXECUTION_HMAC_SECRET, returns 401 on mismatch. Also reads X-TC-Idempotency and X-TC-Request-ID; logs the request ID on every line.
+Idempotency cache — Start with in-process LRU keyed by X-TC-Idempotency with 24h TTL. Cache the full response body. On duplicate key within window, return cached response and skip broker call. Document the upgrade path to Redis if needed.
+Shared DB connection + models — Connect to DATABASE_URL (the scoped tc_exec user). Define SQLAlchemy models for User, BrokerAccount, TradingSignal, Trade, BrokerOrder — copy the column definitions from Target Capital's models.py (the user will paste these in). Add a startup self-test: SELECT 1 plus an attempted DELETE FROM users LIMIT 1 that MUST fail — log success of both checks.
+Broker adapter layer — Implement a BrokerExecutor abstract base with place_order, cancel_order, get_order_status. Implement DhanExecutor first using the Dhan SDK. Stub ZerodhaExecutor, AngelExecutor, UpstoxExecutor to raise NotImplementedError for now. A factory in shared/brokers/__init__.py picks the right executor from broker_account.broker_type.
+Order endpoints — POST /v1/orders validates payload (Pydantic), fetches the user's broker credentials from DB, decrypts them with BROKER_MASTER_KEY (Fernet, same scheme as Target Capital), calls the executor, writes a row to trade + broker_order, returns the structured response. POST /v1/orders/{id}/cancel and GET /v1/orders/{id} mirror this pattern. Errors map to the four-bucket taxonomy: broker_error, validation_error, auth_error, halted.
+Health, version, halt endpoints — GET /healthz and GET /version are unauthenticated. GET /v1/halt returns current state; PUT /v1/halt requires X-TC-Admin-Token matching ADMIN_TOKEN env var. Halt state persisted in a SQLite file so it survives restarts.
+Local smoke test — A tests/smoke.sh script that signs a fake POST /v1/orders payload with the dev HMAC secret and posts it to http://localhost:5000. Verify a 200 + a row in the trade table.

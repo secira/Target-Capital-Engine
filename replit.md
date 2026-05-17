@@ -1,45 +1,103 @@
-# [Project name]
+# tc-execution-engine
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A standalone Python FastAPI service that receives HMAC-signed order requests from the Target Capital app, places orders with Indian brokers (Dhan live; Zerodha/Angel/Upstox stubbed), writes fills to the shared Postgres database, and returns structured responses.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `tc-execution-engine` workflow — runs `uvicorn` on port 5000 with hot reload
+- `pnpm --filter @workspace/api-server run dev` — run the Node.js API server (port from env)
+- Required env vars: see `artifacts/tc-execution-engine/.env.example`
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- **Engine**: Python 3.11, FastAPI, Uvicorn/Gunicorn
+- **DB ORM**: SQLAlchemy 2.0, psycopg2-binary (Postgres)
+- **Validation**: Pydantic v2
+- **Crypto**: cryptography (Fernet) for broker credential encryption
+- **Broker**: dhanhq SDK (Dhan live), stubs for Zerodha/Angel/Upstox
+- **Caching**: cachetools TTLCache for idempotency
+- **Deployment**: Procfile (Railway), railway.toml, scripts/deploy_ec2.sh (EC2 future)
+- Node.js workspace: pnpm workspaces, Express 5, Drizzle ORM (separate from the engine)
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+```
+artifacts/tc-execution-engine/
+  main.py                    # Entry point (uvicorn/gunicorn)
+  requirements.txt           # Python deps
+  Procfile                   # Railway deployment
+  railway.toml               # Railway config
+  .env.example               # Env var template
+  app/
+    main.py                  # FastAPI app factory
+    middleware/
+      hmac_auth.py           # HMAC-SHA256 verification dependency
+      idempotency.py         # 24h TTL LRU idempotency cache
+    routers/
+      health.py              # GET /healthz, GET /version, GET|PUT /v1/halt
+      orders.py              # POST /v1/orders, POST /v1/orders/{id}/cancel, GET /v1/orders/{id}
+  shared/
+    db.py                    # DB connection + startup self-test
+    models.py                # SQLAlchemy ORM models (User, BrokerAccount, Trade, BrokerOrder, TradingSignal)
+    schemas.py               # Pydantic request/response schemas
+    crypto.py                # Fernet encrypt/decrypt for broker credentials
+    brokers/
+      __init__.py            # Broker factory (get_executor)
+      base.py                # BrokerExecutor abstract base
+      dhan.py                # DhanExecutor (live, uses dhanhq SDK)
+      stubs.py               # Zerodha/Angel/Upstox (raise NotImplementedError)
+  tests/
+    smoke.sh                 # End-to-end curl smoke test (signs HMAC, checks DB row)
+  scripts/
+    deploy_ec2.sh            # Future EC2 deployment script
+  docs/
+    architecture.md          # Architecture diagram + DB permissions + error taxonomy
+```
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- HMAC-SHA256 over `timestamp + "." + raw_body` — same scheme as Target Capital. Timestamp window is ±60s.
+- Idempotency via in-process `cachetools.TTLCache` (24h / 50k keys). Upgrade path to Redis: swap `cache.get/set` calls — nothing else changes.
+- Halt state persisted in a SQLite file (`halt_state.db`) — survives pod restarts without needing Redis or extra DB writes.
+- DB self-test at startup: SELECT 1 (must pass) + DELETE FROM users WHERE 1=0 (must fail with permission denied).
+- Broker credentials stored encrypted with Fernet using `BROKER_MASTER_KEY` — same key as Target Capital.
+- Error taxonomy: `auth_error` (401), `validation_error` (422), `broker_error` (502), `halted` (503), `not_found` (404).
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+tc-execution-engine is the order placement layer for Target Capital. It:
+- Accepts HMAC-signed order requests from Target Capital
+- Routes to the correct broker (Dhan in Phase 1)
+- Enforces idempotency (no duplicate orders on retry)
+- Supports an emergency halt switch (PUT /v1/halt)
+- Writes trade records to the shared Postgres database
+
+## Secrets required
+
+Set these in Replit Secrets (or Railway env vars / AWS SSM for production):
+
+| Key | Description |
+|-----|-------------|
+| `DATABASE_URL` | PostgreSQL DSN for tc_exec scoped user |
+| `EXECUTION_HMAC_SECRET` | Shared HMAC secret with Target Capital |
+| `BROKER_MASTER_KEY` | Fernet key for broker credential encryption |
+| `ADMIN_TOKEN` | Protects PUT /v1/halt |
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Python 3.11 FastAPI service
+- Port 5000 for Replit dev, reads `$PORT` for Railway/EC2
+- Deploy to Railway first, EC2 (static Elastic IP) later
+- Dhan broker live in Phase 1; Zerodha/Angel/Upstox stubbed
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- `BROKER_MASTER_KEY` must be a valid Fernet key (base64-encoded 32 bytes). Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+- `EXECUTION_HMAC_SECRET` must match the value in Target Capital exactly.
+- The tc_exec Postgres user must have: READ on users/broker_account/trading_signal; INSERT+UPDATE on trade/broker_order. The startup self-test verifies this.
+- Smoke test: `bash artifacts/tc-execution-engine/tests/smoke.sh` (requires `EXECUTION_HMAC_SECRET` in env and real user/broker_account UUIDs).
 
 ## Pointers
 
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- See `artifacts/tc-execution-engine/docs/architecture.md` for the full request flow diagram and DB permissions table.
+- See the `pnpm-workspace` skill for the Node.js workspace structure.

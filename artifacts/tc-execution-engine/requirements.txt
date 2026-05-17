@@ -1,0 +1,13 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+gunicorn==23.0.0
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+cryptography==43.0.3
+python-dotenv==1.0.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
+requests==2.32.3
+httpx==0.28.0
+dhan-tradehull==2.0.1
+cachetools==5.5.0
