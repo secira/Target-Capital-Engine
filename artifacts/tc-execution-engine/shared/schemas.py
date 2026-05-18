@@ -34,7 +34,13 @@ class PlaceOrderRequest(BaseModel):
 
 
 class CancelOrderRequest(BaseModel):
-    pass  # trade_id comes from path; no body required
+    """Body for POST /v1/orders/{trade_id}/cancel.
+
+    user_id + broker_account_id are required so the engine can verify the
+    cancel request actually originates from the user who owns the trade.
+    """
+    user_id: uuid.UUID
+    broker_account_id: uuid.UUID
 
 
 # ---------------------------------------------------------------------------

@@ -49,8 +49,14 @@ def _get_active_secrets() -> list[bytes]:
 
 
 def _compute_hmac(secret: bytes, timestamp: str, raw_body: bytes) -> str:
+    """Canonical form: HMAC-SHA256( timestamp + "." + raw_body )."""
     message = f"{timestamp}.".encode() + raw_body
     return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+def _compute_hmac_no_separator(secret: bytes, timestamp: str) -> str:
+    """Alt form for empty-body requests (typical GET): HMAC( timestamp )."""
+    return hmac.new(secret, timestamp.encode(), hashlib.sha256).hexdigest()
 
 
 async def verify_hmac(
@@ -86,7 +92,10 @@ async def verify_hmac(
     # 2. Read raw body
     raw_body = await request.body()
 
-    # 3. Try each active secret — accept if any matches (constant-time each)
+    # 3. Try each active secret — accept if any matches (constant-time each).
+    # For empty-body requests (typical GET), also accept the "no-separator"
+    # canonicalization since many HTTP clients/libraries don't include a body
+    # placeholder in the signed payload for GETs.
     incoming = x_tc_signature.lower()
     secrets = _get_active_secrets()
     matched = False
@@ -95,6 +104,11 @@ async def verify_hmac(
         if hmac.compare_digest(expected, incoming):
             matched = True
             break
+        if not raw_body:
+            alt = _compute_hmac_no_separator(secret, x_tc_timestamp)
+            if hmac.compare_digest(alt, incoming):
+                matched = True
+                break
 
     if not matched:
         logger.warning("HMAC reject — signature mismatch request_id=%s", x_tc_request_id)

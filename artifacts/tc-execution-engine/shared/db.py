@@ -87,19 +87,28 @@ def run_startup_self_test() -> None:
         # Reaching here means the DELETE was not denied — hard failure.
         delete_passed = True
     except ProgrammingError as exc:
-        # Expected path: "permission denied for table users"
-        logger.info(
-            "DB self-test [DELETE users]: PASSED (permission denied as expected): %s",
-            exc.orig,
-        )
+        # psycopg2 SQLSTATE codes:
+        #   42501  → insufficient_privilege (the expected, correct path)
+        #   42P01  → undefined_table        (schema not migrated yet)
+        pgcode = getattr(exc.orig, "pgcode", None)
+        if pgcode == "42501":
+            logger.info(
+                "DB self-test [DELETE users]: PASSED (permission denied as expected)"
+            )
+        elif pgcode == "42P01":
+            logger.error(
+                "DB self-test [DELETE users]: SCHEMA MISSING — table 'users' does not "
+                "exist. Run `python scripts/init_schema.py` (with a DSN that has CREATE) "
+                "to create the schema, then restart. Orders endpoints will return 500 "
+                "until this is fixed."
+            )
+        else:
+            logger.warning(
+                "DB self-test [DELETE users]: inconclusive (pgcode=%s) — %s",
+                pgcode, exc.orig,
+            )
     except Exception as exc:
-        # Any other error (e.g. table doesn't exist yet) is treated as a warning,
-        # not a hard failure — the table may not be migrated yet in dev.
-        logger.warning(
-            "DB self-test [DELETE users]: inconclusive — %s "
-            "(acceptable in dev before schema migration)",
-            exc,
-        )
+        logger.warning("DB self-test [DELETE users]: inconclusive — %s", exc)
 
     if delete_passed:
         raise PermissionError(

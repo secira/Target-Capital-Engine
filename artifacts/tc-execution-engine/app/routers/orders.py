@@ -14,6 +14,7 @@ import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.middleware.hmac_auth import verify_hmac
@@ -24,6 +25,7 @@ from shared.crypto import decrypt
 from shared.db import get_db
 from shared.models import BrokerAccount, BrokerOrder, Trade, User
 from shared.schemas import (
+    CancelOrderRequest,
     ErrorResponse,
     OrderResponse,
     OrderStatusResponse,
@@ -43,6 +45,19 @@ def _log_prefix(request_id: str) -> str:
     return f"[request_id={request_id}]"
 
 
+def _fetch_user_or_404(db: Session, user_id: uuid.UUID) -> User:
+    """Look up the user; return a clean 404 (not 500) if missing."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"user_not_found: no user with id={user_id}",
+        )
+    if user.is_active is False:
+        raise HTTPException(status_code=404, detail=f"user_inactive: user {user_id} is disabled")
+    return user
+
+
 def _fetch_broker_account(db: Session, broker_account_id: uuid.UUID, user_id: uuid.UUID) -> BrokerAccount:
     acct = (
         db.query(BrokerAccount)
@@ -54,7 +69,22 @@ def _fetch_broker_account(db: Session, broker_account_id: uuid.UUID, user_id: uu
         .first()
     )
     if acct is None:
-        raise HTTPException(status_code=404, detail="Broker account not found or inactive")
+        # Distinguish "wrong owner" vs "missing entirely" for clearer client errors
+        exists = db.query(BrokerAccount).filter(BrokerAccount.id == broker_account_id).first()
+        if exists is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"broker_account_not_found: no broker_account with id={broker_account_id}",
+            )
+        if exists.user_id != user_id:
+            raise HTTPException(
+                status_code=404,
+                detail=f"broker_account_owner_mismatch: broker_account {broker_account_id} does not belong to user {user_id}",
+            )
+        raise HTTPException(
+            status_code=404,
+            detail=f"broker_account_inactive: broker_account {broker_account_id} is disabled",
+        )
     return acct
 
 
@@ -108,7 +138,8 @@ async def place_order(
             cache.set(x_tc_idempotency, resp.model_dump())
             return resp
 
-    # 4. Fetch broker account & decrypt credentials
+    # 4. Validate user + broker account exist (clean 404s, not 500s)
+    _fetch_user_or_404(db, body.user_id)
     broker_acct = _fetch_broker_account(db, body.broker_account_id, body.user_id)
     try:
         access_token = decrypt(broker_acct.encrypted_access_token)
@@ -133,7 +164,17 @@ async def place_order(
         request_id=request_id or None,
     )
     db.add(trade)
-    db.flush()  # get trade.id without committing
+    try:
+        db.flush()  # get trade.id without committing
+    except IntegrityError as exc:
+        db.rollback()
+        # FK violation (e.g. signal_id pointing at a row that doesn't exist)
+        # surfaces here — return 404 with a useful detail instead of 500.
+        logger.warning("%s Trade flush IntegrityError: %s", prefix, exc.orig if hasattr(exc, "orig") else exc)
+        raise HTTPException(
+            status_code=404,
+            detail=f"foreign_key_violation: {getattr(exc, 'orig', exc)}",
+        )
 
     # 6. Place order with broker
     order_params = {
@@ -214,6 +255,7 @@ async def place_order(
 @router.post("/{trade_id}/cancel", response_model=OrderResponse)
 async def cancel_order(
     trade_id: uuid.UUID,
+    body: CancelOrderRequest,
     request_id: Annotated[str, Depends(verify_hmac)],
     db: Session = Depends(get_db),
 ) -> Any:
@@ -221,7 +263,19 @@ async def cancel_order(
 
     trade = db.query(Trade).filter(Trade.id == trade_id).first()
     if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
+        raise HTTPException(status_code=404, detail=f"trade_not_found: no trade with id={trade_id}")
+
+    # Authorization: caller must be the trade's owner
+    if trade.user_id != body.user_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"trade_owner_mismatch: trade {trade_id} does not belong to user {body.user_id}",
+        )
+    if trade.broker_account_id != body.broker_account_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"trade_broker_mismatch: trade {trade_id} does not belong to broker_account {body.broker_account_id}",
+        )
 
     broker_order = trade.broker_orders[0] if trade.broker_orders else None
     if not broker_order:
