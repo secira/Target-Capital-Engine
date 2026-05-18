@@ -110,7 +110,7 @@ Set these in Replit Secrets (or Railway env vars / AWS SSM for production):
 
 | Key | Description |
 |-----|-------------|
-| `DATABASE_URL` | PostgreSQL DSN for tc_exec scoped user |
+| `DATABASE_URL` | PostgreSQL DSN for **TC's dev/prod DB** with the `tc_exec` scoped user (READ on users/broker_account/trading_signal; INSERT+UPDATE on trade/broker_order). The engine has **no DB of its own**. |
 | `EXECUTION_HMAC_SECRET` | Shared HMAC secret with Target Capital |
 | `BROKER_MASTER_KEY` | Fernet key for broker credential encryption |
 | `ADMIN_TOKEN` | Protects PUT /v1/halt |
@@ -121,6 +121,24 @@ Set these in Replit Secrets (or Railway env vars / AWS SSM for production):
 - Port 5000 for Replit dev, reads `$PORT` for Railway/EC2
 - Deploy to Railway first, EC2 (static Elastic IP) later
 - Dhan broker live in Phase 1; Zerodha/Angel/Upstox stubbed
+
+## Database
+
+The engine does **not** own a database. `DATABASE_URL` must point at the
+Target Capital Postgres instance (dev or prod) using the scoped `tc_exec`
+role. The five required tables (`users`, `broker_account`, `trading_signal`,
+`trade`, `broker_order`) live in and are migrated by Target Capital.
+
+- `scripts/init_schema.py` exists only for spinning up a fully isolated test
+  DB (not used in normal operation).
+- `scripts/seed_test_data.py` inserts a deterministic test user +
+  `broker_account` (`11111111-…-1` / `22222222-…-2`) so TC can hardcode
+  UUIDs in integration tests. **Run it from TC's side** (or with TC's
+  elevated DSN) — the engine's `tc_exec` role is read-only on those tables
+  by design.
+- Startup self-test now distinguishes SQLSTATE `42501` (insufficient
+  privilege — the correct outcome) from `42P01` (undefined_table — schema
+  missing) so a misconfigured DSN is obvious from the logs.
 
 ## Gotchas
 
