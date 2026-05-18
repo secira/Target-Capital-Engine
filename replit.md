@@ -40,9 +40,9 @@ artifacts/tc-execution-engine/
     static/
       index.html             # /admin dashboard (vanilla JS, dark theme)
   shared/
-    db.py                    # DB connection + startup self-test
-    models.py                # SQLAlchemy ORM models (User, BrokerAccount, Trade, BrokerOrder, TradingSignal)
-    schemas.py               # Pydantic request/response schemas
+    db.py                    # DB connection + startup self-test (against TC's DB)
+    models.py                # SQLAlchemy ORM bound to TC's real tables: User ("user"), UserBroker (user_brokers), TradingSignal, BrokerOrder (broker_orders)
+    schemas.py               # Pydantic request/response schemas (int IDs; enums match TC's Postgres enums)
     crypto.py                # Fernet encrypt/decrypt for broker credentials
     brokers/
       __init__.py            # Broker factory (get_executor)
@@ -52,6 +52,7 @@ artifacts/tc-execution-engine/
   tests/
     smoke.sh                 # End-to-end curl smoke test (signs HMAC, checks DB row)
   scripts/
+    check_test_data.py       # Verify a known user + user_brokers row exists and credentials decrypt
     deploy_ec2.sh            # Future EC2 deployment script
   docs/
     architecture.md          # Architecture diagram + DB permissions + error taxonomy
@@ -124,27 +125,43 @@ Set these in Replit Secrets (or Railway env vars / AWS SSM for production):
 
 ## Database
 
-The engine does **not** own a database. `DATABASE_URL` must point at the
-Target Capital Postgres instance (dev or prod) using the scoped `tc_exec`
-role. The five required tables (`users`, `broker_account`, `trading_signal`,
-`trade`, `broker_order`) live in and are migrated by Target Capital.
+The engine does **not** own a database. `DATABASE_URL` points at the Target
+Capital Postgres (dev or prod) using the scoped `tc_exec` role. TC owns
+and migrates the schema.
 
-- `scripts/init_schema.py` exists only for spinning up a fully isolated test
-  DB (not used in normal operation).
-- `scripts/seed_test_data.py` inserts a deterministic test user +
-  `broker_account` (`11111111-…-1` / `22222222-…-2`) so TC can hardcode
-  UUIDs in integration tests. **Run it from TC's side** (or with TC's
-  elevated DSN) — the engine's `tc_exec` role is read-only on those tables
-  by design.
-- Startup self-test now distinguishes SQLSTATE `42501` (insufficient
-  privilege — the correct outcome) from `42P01` (undefined_table — schema
-  missing) so a misconfigured DSN is obvious from the logs.
+**Tables the engine touches (TC's real names):**
+
+| Table          | Access      | Purpose |
+|----------------|-------------|---------|
+| `"user"`       | READ        | Verify user identity (singular, reserved — must be quoted). Column `active` (not `is_active`). |
+| `user_brokers` | READ        | Broker connection row. `api_key` / `access_token` / `api_secret` are Fernet-encrypted with `BROKER_MASTER_KEY`. For Dhan: `api_key` = client_id, `access_token` = bearer token. |
+| `trading_signal` | READ      | Optional FK from broker_orders.trading_signal_id. |
+| `broker_orders` | INSERT+UPDATE | Where the engine writes orders. Column `broker_account_id` is misleadingly named — it FK's to `user_brokers(id)`, NOT `broker_accounts`. `correlation_id` holds the X-TC-Idempotency value. |
+
+The empty `broker_accounts` table in TC's DB is deprecated — do not use it.
+
+**Postgres enum values on `broker_orders` (match exactly):**
+- `transactiontype`: `BUY` / `SELL`
+- `ordertype`: `MARKET` / `LIMIT` / `SL` / `SL_M`
+- `producttype`: `INTRADAY` / `DELIVERY` / `CNC` / `MIS`
+- `orderstatus`: `PENDING` / `OPEN` / `COMPLETE` / `CANCELLED` / `REJECTED`
+
+`exchange` is a free-form string — TC stores Dhan's native segment codes
+(`NSE_EQ`, `BSE_EQ`, `NSE_FNO`, etc).
+
+**Known-good integration test row (TC dev DB):**
+- `user_id = 27` ("udayid"), `user_broker_id = 48` (Dhan, fully wired).
+- Verify it from this Repl with: `python scripts/check_test_data.py`.
+
+Startup self-test distinguishes SQLSTATE `42501` (insufficient privilege —
+the correct outcome) from `42P01` (undefined_table — wrong DSN) so a
+misconfigured DSN is obvious from the logs.
 
 ## Gotchas
 
 - `BROKER_MASTER_KEY` must be a valid Fernet key (base64-encoded 32 bytes). Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
 - `EXECUTION_HMAC_SECRET` must match the value in Target Capital exactly.
-- The tc_exec Postgres user must have: READ on users/broker_account/trading_signal; INSERT+UPDATE on trade/broker_order. The startup self-test verifies this.
+- The tc_exec Postgres role must have: READ on `"user"`, `user_brokers`, `trading_signal`; INSERT+UPDATE on `broker_orders`. The startup self-test verifies the no-DELETE-on-"user" side of that.
 - Smoke test: `bash artifacts/tc-execution-engine/tests/smoke.sh` (requires `EXECUTION_HMAC_SECRET` in env and real user/broker_account UUIDs).
 
 ## Pointers

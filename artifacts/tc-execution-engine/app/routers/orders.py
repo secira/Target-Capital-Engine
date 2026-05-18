@@ -1,16 +1,18 @@
-"""Order endpoints.
+"""Order endpoints — bound to TC's real schema.
 
-POST   /v1/orders              — place an order
+POST   /v1/orders              — place an order (inserts into broker_orders)
 POST   /v1/orders/{id}/cancel  — cancel an order
-GET    /v1/orders/{id}         — get order status
+GET    /v1/orders/{id}         — get order status (refresh from broker)
 
-All endpoints require valid HMAC signature (via verify_hmac dependency).
+`{id}` is the integer PK of broker_orders, NOT the broker's own order id.
+
+All endpoints require valid HMAC signature.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import logging
-import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -23,10 +25,9 @@ from app.routers.health import is_halted
 from shared.brokers import get_executor
 from shared.crypto import decrypt
 from shared.db import get_db
-from shared.models import BrokerAccount, BrokerOrder, Trade, User
+from shared.models import BrokerOrder, User, UserBroker
 from shared.schemas import (
     CancelOrderRequest,
-    ErrorResponse,
     OrderResponse,
     OrderStatusResponse,
     PlaceOrderRequest,
@@ -45,47 +46,79 @@ def _log_prefix(request_id: str) -> str:
     return f"[request_id={request_id}]"
 
 
-def _fetch_user_or_404(db: Session, user_id: uuid.UUID) -> User:
-    """Look up the user; return a clean 404 (not 500) if missing."""
+def _fetch_user_or_404(db: Session, user_id: int) -> User:
     user = db.query(User).filter(User.id == user_id).first()
     if user is None:
         raise HTTPException(
-            status_code=404,
-            detail=f"user_not_found: no user with id={user_id}",
+            status_code=404, detail=f"user_not_found: no user with id={user_id}"
         )
-    if user.is_active is False:
-        raise HTTPException(status_code=404, detail=f"user_inactive: user {user_id} is disabled")
+    if user.active is False:
+        raise HTTPException(
+            status_code=404, detail=f"user_inactive: user {user_id} is disabled"
+        )
     return user
 
 
-def _fetch_broker_account(db: Session, broker_account_id: uuid.UUID, user_id: uuid.UUID) -> BrokerAccount:
-    acct = (
-        db.query(BrokerAccount)
-        .filter(
-            BrokerAccount.id == broker_account_id,
-            BrokerAccount.user_id == user_id,
-            BrokerAccount.is_active.is_(True),
-        )
-        .first()
-    )
-    if acct is None:
-        # Distinguish "wrong owner" vs "missing entirely" for clearer client errors
-        exists = db.query(BrokerAccount).filter(BrokerAccount.id == broker_account_id).first()
-        if exists is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"broker_account_not_found: no broker_account with id={broker_account_id}",
-            )
-        if exists.user_id != user_id:
-            raise HTTPException(
-                status_code=404,
-                detail=f"broker_account_owner_mismatch: broker_account {broker_account_id} does not belong to user {user_id}",
-            )
+def _fetch_user_broker_or_404(
+    db: Session, user_broker_id: int, user_id: int
+) -> UserBroker:
+    ub = db.query(UserBroker).filter(UserBroker.id == user_broker_id).first()
+    if ub is None:
         raise HTTPException(
             status_code=404,
-            detail=f"broker_account_inactive: broker_account {broker_account_id} is disabled",
+            detail=f"user_broker_not_found: no user_brokers row with id={user_broker_id}",
         )
-    return acct
+    if ub.user_id != user_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"user_broker_owner_mismatch: user_brokers {user_broker_id} does not belong to user {user_id}",
+        )
+    if ub.is_active is False:
+        raise HTTPException(
+            status_code=404,
+            detail=f"user_broker_inactive: user_brokers {user_broker_id} is disabled",
+        )
+    return ub
+
+
+def _resolve_broker_creds(ub: UserBroker) -> tuple[str, str, str]:
+    """Decrypt the credentials needed to talk to the broker.
+
+    Returns (broker_type, client_id, access_token).
+
+    For Dhan: client_id is stored in api_key, access_token in access_token.
+    Both are Fernet-encrypted with BROKER_MASTER_KEY.
+    """
+    broker_type = (ub.broker_type or ub.broker_name or "").lower().strip()
+    if not broker_type:
+        raise HTTPException(status_code=500, detail="user_broker has no broker_type")
+    try:
+        client_id = decrypt(ub.api_key) if ub.api_key else ""
+        access_token = decrypt(ub.access_token) if ub.access_token else ""
+    except Exception as exc:
+        logger.error("Failed to decrypt broker credentials: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to decrypt broker credentials")
+    if not client_id or not access_token:
+        raise HTTPException(
+            status_code=500, detail="user_broker is missing api_key or access_token"
+        )
+    return broker_type, client_id, access_token
+
+
+def _to_response(bo: BrokerOrder, broker_type: str) -> OrderResponse:
+    return OrderResponse(
+        order_id=bo.id,
+        broker_order_id=bo.broker_order_id or "",
+        status=bo.order_status or "PENDING",
+        symbol=bo.symbol,
+        exchange=bo.exchange,
+        transaction_type=bo.transaction_type,
+        quantity=bo.quantity,
+        order_type=bo.order_type,
+        product_type=bo.product_type,
+        price=float(bo.price or 0),
+        broker_type=broker_type,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -107,76 +140,108 @@ async def place_order(
         logger.info("%s Order rejected — engine halted", prefix)
         raise HTTPException(status_code=503, detail="halted")
 
-    # 2. Idempotency check
-    if x_tc_idempotency and x_tc_idempotency in cache:
-        logger.info("%s Idempotency hit key=%r", prefix, x_tc_idempotency)
-        return cache.get(x_tc_idempotency)
+    # 2. Idempotency. Key is SCOPED by (user_id, user_broker_id, X-TC-Idempotency)
+    #    so two different users using the same key string can't be conflated and
+    #    one cannot receive the other's order response. The same scoping is
+    #    applied to the DB lookup below.
+    #
+    #    NB: broker_orders.correlation_id has no DB UNIQUE constraint (we don't
+    #    own TC's schema), so this read-then-insert pattern still races under
+    #    truly concurrent retries on a single key. The in-process cache absorbs
+    #    same-instance retries; cross-instance concurrent retries on the same
+    #    key are out of scope for Phase 1 (single Railway dyno).
+    scoped_key = (
+        f"{body.user_id}:{body.user_broker_id}:{x_tc_idempotency}"
+        if x_tc_idempotency
+        else ""
+    )
+    if scoped_key and scoped_key in cache:
+        logger.info("%s Idempotency cache hit key=%r", prefix, scoped_key)
+        return cache.get(scoped_key)
 
-    # 3. Check for duplicate idempotency key in DB
+    # 3. DB-level idempotency via broker_orders.correlation_id, scoped to the
+    #    same (user, user_broker) so it can't return another user's order.
     if x_tc_idempotency:
-        existing_trade = (
-            db.query(Trade)
-            .filter(Trade.idempotency_key == x_tc_idempotency)
+        existing = (
+            db.query(BrokerOrder)
+            .filter(
+                BrokerOrder.correlation_id == x_tc_idempotency,
+                BrokerOrder.broker_account_id == body.user_broker_id,
+            )
             .first()
         )
-        if existing_trade:
-            logger.info("%s DB idempotency hit key=%r trade_id=%s", prefix, x_tc_idempotency, existing_trade.id)
-            broker_order = existing_trade.broker_orders[0] if existing_trade.broker_orders else None
-            resp = OrderResponse(
-                trade_id=existing_trade.id,
-                broker_order_id=broker_order.broker_order_id if broker_order else "",
-                status=existing_trade.status,
-                symbol=existing_trade.symbol,
-                exchange=existing_trade.exchange,
-                transaction_type=existing_trade.transaction_type,
-                quantity=existing_trade.quantity,
-                order_type=existing_trade.order_type,
-                product_type=existing_trade.product_type,
-                price=float(existing_trade.price or 0),
-                broker_type=broker_order.broker_type if broker_order else "",
+        if existing:
+            # Defensive double-check: the user_broker row must belong to the
+            # caller. (broker_account_id alone isn't enough — somebody could
+            # have transferred the user_broker since.)
+            existing_ub = existing.user_broker
+            if existing_ub is None or existing_ub.user_id != body.user_id:
+                logger.warning(
+                    "%s DB idempotency hit key=%r but owner mismatch — refusing to return",
+                    prefix, x_tc_idempotency,
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail="idempotency_key_collision: key already used by another caller",
+                )
+            logger.info(
+                "%s DB idempotency hit key=%r order_id=%s",
+                prefix, x_tc_idempotency, existing.id,
             )
-            cache.set(x_tc_idempotency, resp.model_dump())
+            broker_type = existing_ub.broker_type or ""
+            resp = _to_response(existing, broker_type)
+            cache.set(scoped_key, resp.model_dump())
             return resp
 
-    # 4. Validate user + broker account exist (clean 404s, not 500s)
+    # 4. Validate user + user_broker (clean 404s, not 500s)
     _fetch_user_or_404(db, body.user_id)
-    broker_acct = _fetch_broker_account(db, body.broker_account_id, body.user_id)
-    try:
-        access_token = decrypt(broker_acct.encrypted_access_token)
-    except Exception as exc:
-        logger.error("%s Failed to decrypt broker credentials: %s", prefix, exc)
-        raise HTTPException(status_code=500, detail="Failed to decrypt broker credentials")
+    ub = _fetch_user_broker_or_404(db, body.user_broker_id, body.user_id)
+    broker_type, client_id, access_token = _resolve_broker_creds(ub)
 
-    # 5. Create Trade record (status=pending)
-    trade = Trade(
-        user_id=body.user_id,
-        broker_account_id=broker_acct.id,
-        signal_id=body.signal_id,
+    # 5. INSERT broker_orders row (status=PENDING) so we have an id before
+    #    calling the broker. If the broker call fails we UPDATE status=REJECTED.
+    now = datetime.datetime.utcnow()
+    trading_symbol = body.trading_symbol or body.symbol
+    bo = BrokerOrder(
+        broker_account_id=ub.id,                     # FK → user_brokers.id
+        broker_order_id=None,                         # filled in after broker accepts
+        correlation_id=x_tc_idempotency or None,
         symbol=body.symbol,
+        trading_symbol=trading_symbol,
         exchange=body.exchange,
+        security_id=body.security_id,
         transaction_type=body.transaction_type,
-        quantity=body.quantity,
-        price=body.price,
         order_type=body.order_type,
         product_type=body.product_type,
-        status="pending",
-        idempotency_key=x_tc_idempotency or None,
-        request_id=request_id or None,
+        quantity=body.quantity,
+        filled_quantity=0,
+        pending_quantity=body.quantity,
+        price=body.price or 0.0,
+        trigger_price=body.trigger_price or 0.0,
+        disclosed_quantity=body.disclosed_quantity or 0,
+        order_status="PENDING",
+        status_message="",
+        avg_execution_price=0.0,
+        trading_signal_id=body.trading_signal_id,
+        tenant_id=body.tenant_id or ub.tenant_id or "live",
+        order_time=now,
+        last_updated=now,
     )
-    db.add(trade)
+    db.add(bo)
     try:
-        db.flush()  # get trade.id without committing
+        db.flush()
     except IntegrityError as exc:
         db.rollback()
-        # FK violation (e.g. signal_id pointing at a row that doesn't exist)
-        # surfaces here — return 404 with a useful detail instead of 500.
-        logger.warning("%s Trade flush IntegrityError: %s", prefix, exc.orig if hasattr(exc, "orig") else exc)
+        logger.warning(
+            "%s broker_orders insert IntegrityError: %s",
+            prefix, getattr(exc, "orig", exc),
+        )
         raise HTTPException(
             status_code=404,
             detail=f"foreign_key_violation: {getattr(exc, 'orig', exc)}",
         )
 
-    # 6. Place order with broker
+    # 6. Place the order with the broker.
     order_params = {
         "security_id": body.security_id,
         "exchange_segment": body.exchange,
@@ -191,174 +256,157 @@ async def place_order(
         "after_market_order": body.after_market_order,
         "tag": body.tag,
     }
-
     try:
-        executor = get_executor(broker_acct.broker_type, broker_acct.client_id, access_token)
+        executor = get_executor(broker_type, client_id, access_token)
         result = executor.place_order(order_params)
     except NotImplementedError as exc:
-        trade.status = "rejected"
-        trade.error_code = "broker_error"
-        trade.error_message = str(exc)
+        bo.order_status = "REJECTED"
+        bo.status_message = str(exc)[:255]
+        bo.last_updated = datetime.datetime.utcnow()
         db.commit()
         raise HTTPException(status_code=501, detail=str(exc))
     except Exception as exc:
         logger.error("%s Broker place_order failed: %s", prefix, exc)
-        trade.status = "rejected"
-        trade.error_code = "broker_error"
-        trade.error_message = str(exc)
+        bo.order_status = "REJECTED"
+        bo.status_message = str(exc)[:255]
+        bo.last_updated = datetime.datetime.utcnow()
         db.commit()
         raise HTTPException(status_code=502, detail=f"broker_error: {exc}")
 
-    # 7. Write BrokerOrder and update Trade
-    broker_order = BrokerOrder(
-        trade_id=trade.id,
-        broker_type=broker_acct.broker_type,
-        broker_order_id=result["broker_order_id"],
-        status=result.get("status", "pending"),
-        raw_request=json.dumps(order_params),
-        raw_response=json.dumps(result.get("raw", {})),
-    )
-    db.add(broker_order)
-    trade.status = "placed"
+    # 7. Update the row with the broker's order id + accepted status
+    bo.broker_order_id = str(result.get("broker_order_id", ""))
+    bo.order_status = (result.get("status") or "PENDING").upper()
+    bo.last_updated = datetime.datetime.utcnow()
     db.commit()
-    db.refresh(broker_order)
+    db.refresh(bo)
 
     logger.info(
-        "%s Order placed trade_id=%s broker_order_id=%s broker=%s",
-        prefix, trade.id, result["broker_order_id"], broker_acct.broker_type,
+        "%s Order placed order_id=%s broker_order_id=%s broker=%s",
+        prefix, bo.id, bo.broker_order_id, broker_type,
     )
 
-    resp = OrderResponse(
-        trade_id=trade.id,
-        broker_order_id=result["broker_order_id"],
-        status=trade.status,
-        symbol=trade.symbol,
-        exchange=trade.exchange,
-        transaction_type=trade.transaction_type,
-        quantity=trade.quantity,
-        order_type=trade.order_type,
-        product_type=trade.product_type,
-        price=float(trade.price or 0),
-        broker_type=broker_acct.broker_type,
-    )
-
-    if x_tc_idempotency:
-        cache.set(x_tc_idempotency, resp.model_dump())
-
+    resp = _to_response(bo, broker_type)
+    if scoped_key:
+        cache.set(scoped_key, resp.model_dump())
     return resp
 
 
 # ---------------------------------------------------------------------------
-# POST /v1/orders/{id}/cancel
+# POST /v1/orders/{order_id}/cancel
 # ---------------------------------------------------------------------------
 
-@router.post("/{trade_id}/cancel", response_model=OrderResponse)
+@router.post("/{order_id}/cancel", response_model=OrderResponse)
 async def cancel_order(
-    trade_id: uuid.UUID,
+    order_id: int,
     body: CancelOrderRequest,
     request_id: Annotated[str, Depends(verify_hmac)],
     db: Session = Depends(get_db),
 ) -> Any:
     prefix = _log_prefix(request_id)
 
-    trade = db.query(Trade).filter(Trade.id == trade_id).first()
-    if not trade:
-        raise HTTPException(status_code=404, detail=f"trade_not_found: no trade with id={trade_id}")
-
-    # Authorization: caller must be the trade's owner
-    if trade.user_id != body.user_id:
+    bo = db.query(BrokerOrder).filter(BrokerOrder.id == order_id).first()
+    if not bo:
         raise HTTPException(
-            status_code=404,
-            detail=f"trade_owner_mismatch: trade {trade_id} does not belong to user {body.user_id}",
-        )
-    if trade.broker_account_id != body.broker_account_id:
-        raise HTTPException(
-            status_code=404,
-            detail=f"trade_broker_mismatch: trade {trade_id} does not belong to broker_account {body.broker_account_id}",
+            status_code=404, detail=f"order_not_found: no broker_orders row with id={order_id}"
         )
 
-    broker_order = trade.broker_orders[0] if trade.broker_orders else None
-    if not broker_order:
-        raise HTTPException(status_code=400, detail="No broker order associated with this trade")
+    # Authorization: the caller's user_broker_id must match, and that
+    # user_broker must belong to body.user_id.
+    if bo.broker_account_id != body.user_broker_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"order_broker_mismatch: order {order_id} does not belong to user_broker {body.user_broker_id}",
+        )
+    ub = bo.user_broker
+    if ub is None or ub.user_id != body.user_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"order_owner_mismatch: order {order_id} does not belong to user {body.user_id}",
+        )
 
-    broker_acct = trade.broker_account
-    try:
-        access_token = decrypt(broker_acct.encrypted_access_token)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail="Failed to decrypt broker credentials")
+    if not bo.broker_order_id:
+        raise HTTPException(
+            status_code=400,
+            detail="order has no broker_order_id yet — nothing to cancel at the broker",
+        )
 
+    broker_type, client_id, access_token = _resolve_broker_creds(ub)
     try:
-        executor = get_executor(broker_acct.broker_type, broker_acct.client_id, access_token)
-        result = executor.cancel_order(broker_order.broker_order_id)
+        executor = get_executor(broker_type, client_id, access_token)
+        result = executor.cancel_order(bo.broker_order_id)
     except NotImplementedError as exc:
         raise HTTPException(status_code=501, detail=str(exc))
     except Exception as exc:
         logger.error("%s Broker cancel_order failed: %s", prefix, exc)
         raise HTTPException(status_code=502, detail=f"broker_error: {exc}")
 
-    broker_order.status = "CANCELLED"
-    broker_order.raw_response = json.dumps(result.get("raw", {}))
-    trade.status = "cancelled"
+    bo.order_status = "CANCELLED"
+    bo.status_message = json.dumps(result.get("raw", {}))[:255]
+    bo.last_updated = datetime.datetime.utcnow()
     db.commit()
+    db.refresh(bo)
 
-    logger.info("%s Order cancelled trade_id=%s broker_order_id=%s", prefix, trade_id, broker_order.broker_order_id)
-
-    return OrderResponse(
-        trade_id=trade.id,
-        broker_order_id=broker_order.broker_order_id,
-        status="cancelled",
-        symbol=trade.symbol,
-        exchange=trade.exchange,
-        transaction_type=trade.transaction_type,
-        quantity=trade.quantity,
-        order_type=trade.order_type,
-        product_type=trade.product_type,
-        price=float(trade.price or 0),
-        broker_type=broker_acct.broker_type,
+    logger.info(
+        "%s Order cancelled order_id=%s broker_order_id=%s",
+        prefix, order_id, bo.broker_order_id,
     )
+    return _to_response(bo, broker_type)
 
 
 # ---------------------------------------------------------------------------
-# GET /v1/orders/{id}
+# GET /v1/orders/{order_id}
 # ---------------------------------------------------------------------------
 
-@router.get("/{trade_id}", response_model=OrderStatusResponse)
+@router.get("/{order_id}", response_model=OrderStatusResponse)
 async def get_order(
-    trade_id: uuid.UUID,
+    order_id: int,
     request_id: Annotated[str, Depends(verify_hmac)],
     db: Session = Depends(get_db),
 ) -> Any:
     prefix = _log_prefix(request_id)
 
-    trade = db.query(Trade).filter(Trade.id == trade_id).first()
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
+    bo = db.query(BrokerOrder).filter(BrokerOrder.id == order_id).first()
+    if not bo:
+        raise HTTPException(
+            status_code=404, detail=f"order_not_found: no broker_orders row with id={order_id}"
+        )
 
-    broker_order = trade.broker_orders[0] if trade.broker_orders else None
-    if not broker_order:
-        raise HTTPException(status_code=400, detail="No broker order found")
+    if not bo.broker_order_id:
+        # Order is in our DB but never reached the broker — return what we have.
+        return OrderStatusResponse(
+            order_id=bo.id,
+            broker_order_id="",
+            status=bo.order_status or "PENDING",
+            filled_quantity=int(bo.filled_quantity or 0),
+            average_price=float(bo.avg_execution_price) if bo.avg_execution_price else None,
+            broker_raw={},
+        )
 
-    broker_acct = trade.broker_account
+    ub = bo.user_broker
+    if ub is None:
+        raise HTTPException(status_code=500, detail="order has no associated user_broker")
+
+    broker_type, client_id, access_token = _resolve_broker_creds(ub)
     try:
-        access_token = decrypt(broker_acct.encrypted_access_token)
-        executor = get_executor(broker_acct.broker_type, broker_acct.client_id, access_token)
-        result = executor.get_order_status(broker_order.broker_order_id)
+        executor = get_executor(broker_type, client_id, access_token)
+        result = executor.get_order_status(bo.broker_order_id)
     except NotImplementedError as exc:
         raise HTTPException(status_code=501, detail=str(exc))
     except Exception as exc:
         logger.error("%s Broker get_order_status failed: %s", prefix, exc)
         raise HTTPException(status_code=502, detail=f"broker_error: {exc}")
 
-    # Update local record
-    broker_order.status = result.get("status", broker_order.status)
-    broker_order.raw_response = json.dumps(result.get("raw", {}))
+    new_status = (result.get("status") or bo.order_status or "PENDING").upper()
+    bo.order_status = new_status
+    bo.status_message = json.dumps(result.get("raw", {}))[:255]
+    bo.last_updated = datetime.datetime.utcnow()
     db.commit()
 
     return OrderStatusResponse(
-        trade_id=trade.id,
-        broker_order_id=broker_order.broker_order_id,
-        status=broker_order.status,
-        filled_quantity=broker_order.filled_quantity or 0,
-        average_price=float(broker_order.average_price) if broker_order.average_price else None,
+        order_id=bo.id,
+        broker_order_id=bo.broker_order_id,
+        status=new_status,
+        filled_quantity=int(bo.filled_quantity or 0),
+        average_price=float(bo.avg_execution_price) if bo.avg_execution_price else None,
         broker_raw=result.get("raw", {}),
     )

@@ -1,29 +1,40 @@
-"""SQLAlchemy ORM models for the tc-execution-engine.
+"""SQLAlchemy ORM models — bound to Target Capital's real schema.
 
-These mirror the Target Capital schema.  The tc_exec Postgres user has:
-  READ:   users, broker_account, trading_signal
-  WRITE:  trade, broker_order  (INSERT / UPDATE only)
+The engine has NO database of its own. It reads/writes the TC Postgres
+instance using the scoped `tc_exec` role:
 
-Do NOT add INSERT/UPDATE columns for read-only tables here.
+  READ  : "user", user_brokers, trading_signal
+  WRITE : broker_orders (INSERT + UPDATE only)
+
+Key facts about the TC schema that drove these mappings:
+  - Primary keys are INTEGER, not UUID.
+  - The user table is singular, quoted: "user" (reserved word in Postgres).
+  - `user_brokers` is the broker connection table. Its `api_key`,
+    `access_token`, and `api_secret` columns are Fernet-encrypted text using
+    BROKER_MASTER_KEY. For Dhan, api_key holds the client_id and
+    access_token holds the token.
+  - `broker_orders.broker_account_id` is confusingly named: it actually
+    references user_brokers(id), NOT broker_accounts(id). TC's
+    broker_accounts table exists but is empty/deprecated — do not use it.
+  - There is NO intermediate `trade` table. The engine writes directly to
+    broker_orders.
+  - `correlation_id` on broker_orders is used as the idempotency key
+    (X-TC-Idempotency from the caller).
 """
 from __future__ import annotations
 
 import datetime
-import uuid
 
 from sqlalchemy import (
-    BigInteger,
     Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
-    Numeric,
     String,
     Text,
-    UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -32,104 +43,110 @@ class Base(DeclarativeBase):
 
 
 class User(Base):
-    __tablename__ = "users"
+    """TC's `user` table (singular, reserved word — must be quoted)."""
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    email = Column(String(255), unique=True, nullable=False)
-    name = Column(String(255))
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    __tablename__ = "user"
 
-    broker_accounts = relationship("BrokerAccount", back_populates="user")
-    trades = relationship("Trade", back_populates="user")
+    id = Column(Integer, primary_key=True)
+    username = Column(String, nullable=False)
+    email = Column(String)
+    # TC uses `active` (not `is_active`)
+    active = Column(Boolean)
+    tenant_id = Column(String)
 
+class UserBroker(Base):
+    """TC's `user_brokers` table — the broker connection row.
 
-class BrokerAccount(Base):
-    __tablename__ = "broker_account"
+    api_key, access_token, api_secret are Fernet-encrypted text. Call
+    `shared.crypto.decrypt(value)` before handing to the broker SDK.
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    broker_type = Column(String(50), nullable=False)  # dhan, zerodha, angel, upstox
-    client_id = Column(String(255), nullable=False)
-    # Encrypted with Fernet using BROKER_MASTER_KEY
-    encrypted_access_token = Column(Text, nullable=False)
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    For Dhan: api_key = client_id, access_token = bearer token.
+    """
 
-    user = relationship("User", back_populates="broker_accounts")
-    trades = relationship("Trade", back_populates="broker_account")
+    __tablename__ = "user_brokers"
 
-    __table_args__ = (
-        UniqueConstraint("user_id", "broker_type", name="uq_user_broker"),
+    id = Column(Integer, primary_key=True)
+    # NB: don't quote "user" inside the FK string — SQLAlchemy auto-quotes
+    # reserved words when it emits SQL against the Table object.
+    user_id = Column(Integer, ForeignKey("user.id"), nullable=False)
+    broker_name = Column(String, nullable=False)        # human label, e.g. "Dhan"
+    broker_type = Column(String)                         # lowercase: "dhan", "zerodha", ...
+    api_key = Column(Text)                               # Fernet-encrypted
+    api_secret = Column(Text)                            # Fernet-encrypted
+    access_token = Column(Text)                          # Fernet-encrypted
+    is_active = Column(Boolean)
+    is_primary = Column(Boolean)
+    connection_status = Column(String)
+    tenant_id = Column(String)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+
+    user = relationship("User", foreign_keys=[user_id], lazy="joined")
+    orders = relationship(
+        "BrokerOrder", back_populates="user_broker",
+        foreign_keys="BrokerOrder.broker_account_id",
     )
 
 
 class TradingSignal(Base):
+    """TC's `trading_signal` table — read-only reference."""
+
     __tablename__ = "trading_signal"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    symbol = Column(String(50), nullable=False)
-    exchange = Column(String(20), nullable=False)
-    signal_type = Column(String(20), nullable=False)  # BUY, SELL
-    quantity = Column(Integer, nullable=False)
-    price = Column(Numeric(12, 4))
-    status = Column(String(30), default="pending")
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-
-    trades = relationship("Trade", back_populates="signal")
-
-
-class Trade(Base):
-    __tablename__ = "trade"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    broker_account_id = Column(UUID(as_uuid=True), ForeignKey("broker_account.id"), nullable=False)
-    signal_id = Column(UUID(as_uuid=True), ForeignKey("trading_signal.id"), nullable=True)
-
-    symbol = Column(String(50), nullable=False)
-    exchange = Column(String(20), nullable=False)
-    transaction_type = Column(String(10), nullable=False)  # BUY / SELL
-    quantity = Column(Integer, nullable=False)
-    price = Column(Numeric(12, 4))
-    order_type = Column(String(20), nullable=False)
-    product_type = Column(String(20), nullable=False)
-
-    status = Column(String(30), default="pending")  # pending, placed, filled, rejected, cancelled
-    error_code = Column(String(50))
-    error_message = Column(Text)
-
-    idempotency_key = Column(String(255), unique=True, nullable=True)
-    request_id = Column(String(255), nullable=True)
-
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
-
-    user = relationship("User", back_populates="trades")
-    broker_account = relationship("BrokerAccount", back_populates="trades")
-    signal = relationship("TradingSignal", back_populates="trades")
-    broker_orders = relationship("BrokerOrder", back_populates="trade")
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String, nullable=False)
+    action = Column(String, nullable=False)              # "BUY" / "SELL"
+    tenant_id = Column(String)
+    created_at = Column(DateTime)
 
 
 class BrokerOrder(Base):
-    __tablename__ = "broker_order"
+    """TC's `broker_orders` table — where the engine writes orders.
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    trade_id = Column(UUID(as_uuid=True), ForeignKey("trade.id"), nullable=False)
-    broker_type = Column(String(50), nullable=False)
-    broker_order_id = Column(String(255), nullable=False)
-    status = Column(String(30), default="pending")
+    Despite the column name, `broker_account_id` references user_brokers(id).
+    """
 
-    # Raw JSON response from broker stored as text
-    raw_request = Column(Text)
-    raw_response = Column(Text)
+    __tablename__ = "broker_orders"
 
-    filled_quantity = Column(Integer, default=0)
-    average_price = Column(Numeric(12, 4))
+    id = Column(Integer, primary_key=True)
+    broker_account_id = Column(
+        Integer, ForeignKey("user_brokers.id"), nullable=False
+    )
+    broker_order_id = Column(String)                     # set after broker accepts
+    correlation_id = Column(String)                       # holds X-TC-Idempotency
+    symbol = Column(String, nullable=False)
+    trading_symbol = Column(String, nullable=False)
+    exchange = Column(String, nullable=False)            # e.g. NSE_EQ
+    security_id = Column(String)
 
-    placed_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    # Postgres enums — values must match exactly (case-sensitive):
+    #   transactiontype: BUY / SELL
+    #   ordertype:       MARKET / LIMIT / SL / SL_M
+    #   producttype:     INTRADAY / DELIVERY / CNC / MIS
+    #   orderstatus:     PENDING / OPEN / COMPLETE / CANCELLED / REJECTED
+    transaction_type = Column(String, nullable=False)
+    order_type = Column(String, nullable=False)
+    product_type = Column(String, nullable=False)
+    order_status = Column(String)
 
-    trade = relationship("Trade", back_populates="broker_orders")
+    quantity = Column(Integer, nullable=False)
+    filled_quantity = Column(Integer)
+    pending_quantity = Column(Integer)
+    price = Column(Float)
+    trigger_price = Column(Float)
+    disclosed_quantity = Column(Integer)
+    status_message = Column(String)
+    avg_execution_price = Column(Float)
+
+    trading_signal_id = Column(Integer, ForeignKey("trading_signal.id"))
+    tenant_id = Column(String, nullable=False)           # FK to tenants
+
+    order_time = Column(DateTime, default=datetime.datetime.utcnow)
+    execution_time = Column(DateTime)
+    last_updated = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    user_broker = relationship(
+        "UserBroker", back_populates="orders",
+        foreign_keys=[broker_account_id], lazy="joined",
+    )
+    signal = relationship("TradingSignal", foreign_keys=[trading_signal_id])

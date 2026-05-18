@@ -20,7 +20,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -76,9 +76,11 @@ async def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     db_err: Optional[str] = None
     trade_count = 0
     try:
-        # Trade table may not exist yet in dev — handle gracefully
         result = db.execute(
-            text("SELECT COUNT(*) FROM trade WHERE created_at > NOW() - INTERVAL '24 hours'")
+            text(
+                "SELECT COUNT(*) FROM broker_orders "
+                "WHERE order_time > NOW() - INTERVAL '24 hours'"
+            )
         )
         trade_count = int(result.scalar() or 0)
     except Exception as exc:
@@ -118,13 +120,14 @@ async def list_trades(
             text(
                 """
                 SELECT
-                    t.id, t.symbol, t.exchange, t.transaction_type, t.quantity,
-                    t.price, t.order_type, t.product_type, t.status,
-                    t.error_code, t.error_message, t.created_at,
-                    bo.broker_order_id, bo.broker_type, bo.status AS broker_status
-                FROM trade t
-                LEFT JOIN broker_order bo ON bo.trade_id = t.id
-                ORDER BY t.created_at DESC
+                    bo.id, bo.symbol, bo.exchange, bo.transaction_type,
+                    bo.quantity, bo.price, bo.order_type, bo.product_type,
+                    bo.order_status, bo.status_message, bo.broker_order_id,
+                    bo.correlation_id, bo.order_time, bo.tenant_id,
+                    ub.broker_type, ub.user_id
+                FROM broker_orders bo
+                LEFT JOIN user_brokers ub ON ub.id = bo.broker_account_id
+                ORDER BY bo.order_time DESC NULLS LAST
                 LIMIT :limit
                 """
             ),
@@ -134,21 +137,22 @@ async def list_trades(
         return {
             "trades": [
                 {
-                    "trade_id": str(r["id"]),
+                    "order_id": int(r["id"]),
                     "symbol": r["symbol"],
                     "exchange": r["exchange"],
                     "side": r["transaction_type"],
                     "quantity": r["quantity"],
-                    "price": float(r["price"]) if r["price"] else 0.0,
+                    "price": float(r["price"]) if r["price"] is not None else 0.0,
                     "order_type": r["order_type"],
                     "product_type": r["product_type"],
-                    "status": r["status"],
-                    "error_code": r["error_code"],
-                    "error_message": r["error_message"],
+                    "status": r["order_status"],
+                    "status_message": r["status_message"],
                     "broker_order_id": r["broker_order_id"] or "",
                     "broker_type": r["broker_type"] or "",
-                    "broker_status": r["broker_status"] or "",
-                    "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+                    "user_id": int(r["user_id"]) if r["user_id"] is not None else None,
+                    "tenant_id": r["tenant_id"],
+                    "correlation_id": r["correlation_id"] or "",
+                    "created_at": r["order_time"].isoformat() if r["order_time"] else "",
                 }
                 for r in rows
             ]
@@ -163,16 +167,18 @@ async def list_trades(
 
 @router.get("/broker-accounts", dependencies=[Depends(require_admin)])
 async def list_broker_accounts(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """List active user_brokers rows — what the engine can place orders against."""
     try:
         rows = db.execute(
             text(
                 """
-                SELECT ba.id, ba.user_id, ba.broker_type, ba.client_id, ba.is_active,
-                       u.email
-                FROM broker_account ba
-                LEFT JOIN users u ON u.id = ba.user_id
-                WHERE ba.is_active = true
-                ORDER BY u.email
+                SELECT ub.id, ub.user_id, ub.broker_type, ub.broker_name,
+                       ub.is_active, ub.connection_status, ub.tenant_id,
+                       u.username, u.email
+                FROM user_brokers ub
+                LEFT JOIN "user" u ON u.id = ub.user_id
+                WHERE ub.is_active = true
+                ORDER BY u.username NULLS LAST, ub.id
                 LIMIT 100
                 """
             )
@@ -181,10 +187,13 @@ async def list_broker_accounts(db: Session = Depends(get_db)) -> dict[str, Any]:
         return {
             "accounts": [
                 {
-                    "broker_account_id": str(r["id"]),
-                    "user_id": str(r["user_id"]),
-                    "broker_type": r["broker_type"],
-                    "client_id": r["client_id"],
+                    "user_broker_id": int(r["id"]),
+                    "user_id": int(r["user_id"]),
+                    "broker_type": r["broker_type"] or r["broker_name"],
+                    "broker_name": r["broker_name"],
+                    "connection_status": r["connection_status"],
+                    "tenant_id": r["tenant_id"],
+                    "username": r["username"] or "",
                     "email": r["email"] or "",
                 }
                 for r in rows
@@ -219,17 +228,19 @@ async def toggle_halt(body: HaltToggle) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 class TestOrderRequest(BaseModel):
-    user_id: uuid.UUID
-    broker_account_id: uuid.UUID
+    user_id: int
+    user_broker_id: int
     symbol: str
-    exchange: str
+    trading_symbol: Optional[str] = None
+    exchange: str = "NSE_EQ"           # Dhan segment code
     security_id: str
-    transaction_type: str  # BUY / SELL
+    transaction_type: str               # BUY / SELL
     quantity: int
-    order_type: str = "MARKET"
-    product_type: str = "CNC"
+    order_type: str = "MARKET"          # MARKET / LIMIT / SL / SL_M
+    product_type: str = "CNC"           # INTRADAY / DELIVERY / CNC / MIS
     price: float = 0.0
     tag: str = "admin-ui"
+    tenant_id: str = "live"
 
 
 @router.post("/test-order", dependencies=[Depends(require_admin)])

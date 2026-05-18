@@ -13,26 +13,29 @@ from shared.brokers.base import BrokerExecutor
 logger = logging.getLogger(__name__)
 
 
-# Dhan order type / exchange mappings
-_EXCHANGE_MAP = {
-    "NSE": "NSE",
-    "BSE": "BSE",
-    "NFO": "NFO",
-    "BFO": "BFO",
-    "MCX": "MCX",
-    "CDS": "CDS",
-}
-
+# Dhan order type / exchange mappings.
+#
+# TC's `broker_orders` enums use values like SL_M / INTRADAY / DELIVERY / CNC
+# / MIS, but the dhanhq SDK expects STOP_LOSS / STOP_LOSS_MARKET / CNC /
+# INTRADAY / MARGIN. Map from TC's enum value → Dhan SDK value here.
+#
+# Exchange is passed through unchanged — TC stores Dhan's native segment
+# codes (NSE_EQ, BSE_EQ, NSE_FNO, etc).
 _ORDER_TYPE_MAP = {
     "MARKET": "MARKET",
     "LIMIT": "LIMIT",
     "SL": "STOP_LOSS",
+    "SL_M": "STOP_LOSS_MARKET",
+    # tolerate legacy / alternate spellings
     "SLM": "STOP_LOSS_MARKET",
 }
 
 _PRODUCT_MAP = {
     "CNC": "CNC",
+    "DELIVERY": "CNC",
     "MIS": "INTRADAY",
+    "INTRADAY": "INTRADAY",
+    # legacy aliases
     "NRML": "MARGIN",
     "MTF": "MTF",
     "CO": "CO",
@@ -64,7 +67,9 @@ class DhanExecutor(BrokerExecutor):
         """
         from dhanhq import dhanhq as _dh  # noqa: F401 – ensure import
 
-        exchange = _EXCHANGE_MAP.get(order_params.get("exchange_segment", ""), order_params.get("exchange_segment", "NSE"))
+        # TC stores Dhan's native segment codes already (NSE_EQ etc), so
+        # pass `exchange_segment` straight through to the SDK.
+        exchange = order_params.get("exchange_segment", "NSE_EQ")
         order_type = _ORDER_TYPE_MAP.get(order_params.get("order_type", "MARKET"), "MARKET")
         product_type = _PRODUCT_MAP.get(order_params.get("product_type", "CNC"), "CNC")
 

@@ -1,11 +1,14 @@
 """Database connection and startup self-test.
 
-Uses the scoped tc_exec Postgres user.  DATABASE_URL must be set in env.
+Uses the scoped tc_exec Postgres user against TC's shared DB.
+DATABASE_URL must be set in env.
 
 Self-test (run at startup):
-  1. SELECT 1  — verifies connectivity.
-  2. DELETE FROM users LIMIT 1  — MUST fail (permission denied) confirming
-     the tc_exec user has no write access to sensitive tables.
+  1. SELECT 1                         — verifies connectivity.
+  2. DELETE FROM "user" WHERE 1=0     — MUST fail with SQLSTATE 42501
+     (insufficient privilege) confirming the tc_exec role has no write
+     access to TC's sensitive tables. Note: "user" is quoted because it's
+     a Postgres reserved word.
 """
 from __future__ import annotations
 
@@ -82,7 +85,7 @@ def run_startup_self_test() -> None:
     delete_passed = False
     try:
         with engine.connect() as conn:
-            conn.execute(text("DELETE FROM users WHERE 1=0"))
+            conn.execute(text('DELETE FROM "user" WHERE 1=0'))
             conn.rollback()
         # Reaching here means the DELETE was not denied — hard failure.
         delete_passed = True
@@ -97,10 +100,9 @@ def run_startup_self_test() -> None:
             )
         elif pgcode == "42P01":
             logger.error(
-                "DB self-test [DELETE users]: SCHEMA MISSING — table 'users' does not "
-                "exist. Run `python scripts/init_schema.py` (with a DSN that has CREATE) "
-                "to create the schema, then restart. Orders endpoints will return 500 "
-                "until this is fixed."
+                'DB self-test [DELETE "user"]: SCHEMA MISSING — table "user" does not '
+                "exist. DATABASE_URL is pointing at a database that doesn't have TC's "
+                "schema. Re-point at TC's dev/prod DB and restart."
             )
         else:
             logger.warning(
@@ -111,8 +113,20 @@ def run_startup_self_test() -> None:
         logger.warning("DB self-test [DELETE users]: inconclusive — %s", exc)
 
     if delete_passed:
-        raise PermissionError(
-            "SECURITY: tc_exec DB user has DELETE permission on 'users'. "
-            "Revoke it immediately and restart. "
-            "Engine startup aborted."
+        msg = (
+            'SECURITY: DB role has DELETE permission on "user". '
+            "Create a scoped tc_exec role (READ on user/user_brokers/trading_signal, "
+            "INSERT+UPDATE on broker_orders) and point DATABASE_URL at it."
         )
+        if os.environ.get("TC_EXEC_ALLOW_UNSCOPED_DB") == "1":
+            # Dev escape hatch — proceed but make it impossible to miss.
+            logger.warning("=" * 78)
+            logger.warning("%s", msg)
+            logger.warning(
+                "TC_EXEC_ALLOW_UNSCOPED_DB=1 is set — continuing anyway. "
+                "DO NOT set this in production."
+            )
+            logger.warning("=" * 78)
+        else:
+            raise PermissionError(msg + " Engine startup aborted. "
+                "Set TC_EXEC_ALLOW_UNSCOPED_DB=1 to override in dev.")

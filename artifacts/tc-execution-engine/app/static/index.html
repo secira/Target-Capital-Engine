@@ -208,14 +208,14 @@
           <label>Order type</label>
           <select id="oOrderType">
             <option>MARKET</option><option>LIMIT</option>
-            <option>SL</option><option>SLM</option>
+            <option>SL</option><option>SL_M</option>
           </select>
         </div>
         <div>
           <label>Product</label>
           <select id="oProduct">
-            <option>CNC</option><option>MIS</option><option>NRML</option>
-            <option>MTF</option><option>CO</option><option>BO</option>
+            <option>CNC</option><option>INTRADAY</option>
+            <option>DELIVERY</option><option>MIS</option>
           </select>
         </div>
         <div>
@@ -391,7 +391,7 @@ async function loadBrokerAccounts() {
     }
     sel.innerHTML = '<option value="">— select —</option>' +
       accounts.map(a =>
-        `<option value="${a.broker_account_id}|${a.user_id}">${a.email || '?'} · ${a.broker_type} · ${a.client_id}</option>`
+        `<option value="${a.user_broker_id}|${a.user_id}">${a.email || '?'} · ${a.broker_type} · ${a.client_id}</option>`
       ).join("");
   } catch (e) {
     sel.innerHTML = '<option value="">— error —</option>';
@@ -418,11 +418,11 @@ async function setHalt(halted) {
 async function placeTestOrder() {
   const sel = document.getElementById("brokerSelect").value;
   if (!sel) { toast("Select a broker account first.", "bad"); return; }
-  const [broker_account_id, user_id] = sel.split("|");
+  const [user_broker_id, user_id] = sel.split("|");
 
   const body = {
-    user_id,
-    broker_account_id,
+    user_id: parseInt(user_id, 10),
+    user_broker_id: parseInt(user_broker_id, 10),
     symbol:           document.getElementById("oSymbol").value.trim(),
     exchange:         document.getElementById("oExchange").value,
     security_id:      document.getElementById("oSecurityId").value.trim(),
