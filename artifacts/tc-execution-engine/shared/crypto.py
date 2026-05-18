@@ -3,7 +3,7 @@
 Mirrors Target Capital's resolution chain (from TC's models_broker.py /
 security.environment_config.setup_secure_environment):
 
-  1. BROKER_MASTER_KEY env var (preferred — same value TC uses in prod).
+  1. BROKER_ENCRYPTION_KEY env var (preferred — same value TC uses in prod).
   2. Legacy dev key derived from the literal
      "Target Capital_Dev_Key_32_Chars_Long_123=", padded/truncated to 32
      bytes and url-safe base64 encoded. Dev-only.
@@ -26,7 +26,7 @@ _LEGACY_DEV_SEED = b"Target Capital_Dev_Key_32_Chars_Long_123="
 
 def _candidate_keys() -> List[bytes]:
     keys: List[bytes] = []
-    env = os.environ.get("BROKER_MASTER_KEY", "")
+    env = os.environ.get("BROKER_ENCRYPTION_KEY", "")
     if env:
         env_bytes = env.encode() if isinstance(env, str) else env
         try:
@@ -53,7 +53,7 @@ def _fernets() -> List[Fernet]:
             continue
     if not out:
         raise RuntimeError(
-            "No usable Fernet key found. Set BROKER_MASTER_KEY to TC's master key."
+            "No usable Fernet key found. Set BROKER_ENCRYPTION_KEY to TC's master key."
         )
     return out
 

@@ -87,7 +87,7 @@ def _resolve_broker_creds(ub: UserBroker) -> tuple[str, str, str]:
     Returns (broker_type, client_id, access_token).
 
     For Dhan: client_id is stored in api_key, access_token in access_token.
-    Both are Fernet-encrypted with BROKER_MASTER_KEY.
+    Both are Fernet-encrypted with BROKER_ENCRYPTION_KEY.
     """
     broker_type = (ub.broker_type or ub.broker_name or "").lower().strip()
     if not broker_type:
@@ -261,14 +261,14 @@ async def place_order(
         result = executor.place_order(order_params)
     except NotImplementedError as exc:
         bo.order_status = "REJECTED"
-        bo.status_message = str(exc)[:255]
+        bo.status_message = str(exc)[:200]   # broker_orders.status_message is varchar(200)
         bo.last_updated = datetime.datetime.utcnow()
         db.commit()
         raise HTTPException(status_code=501, detail=str(exc))
     except Exception as exc:
         logger.error("%s Broker place_order failed: %s", prefix, exc)
         bo.order_status = "REJECTED"
-        bo.status_message = str(exc)[:255]
+        bo.status_message = str(exc)[:200]   # broker_orders.status_message is varchar(200)
         bo.last_updated = datetime.datetime.utcnow()
         db.commit()
         raise HTTPException(status_code=502, detail=f"broker_error: {exc}")
@@ -341,7 +341,7 @@ async def cancel_order(
         raise HTTPException(status_code=502, detail=f"broker_error: {exc}")
 
     bo.order_status = "CANCELLED"
-    bo.status_message = json.dumps(result.get("raw", {}))[:255]
+    bo.status_message = json.dumps(result.get("raw", {}))[:200]
     bo.last_updated = datetime.datetime.utcnow()
     db.commit()
     db.refresh(bo)
@@ -398,7 +398,7 @@ async def get_order(
 
     new_status = (result.get("status") or bo.order_status or "PENDING").upper()
     bo.order_status = new_status
-    bo.status_message = json.dumps(result.get("raw", {}))[:255]
+    bo.status_message = json.dumps(result.get("raw", {}))[:200]
     bo.last_updated = datetime.datetime.utcnow()
     db.commit()
 

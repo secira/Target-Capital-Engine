@@ -64,7 +64,7 @@ artifacts/tc-execution-engine/
 - Idempotency via in-process `cachetools.TTLCache` (24h / 50k keys). Upgrade path to Redis: swap `cache.get/set` calls — nothing else changes.
 - Halt state persisted in a SQLite file (`halt_state.db`) — survives pod restarts without needing Redis or extra DB writes.
 - DB self-test at startup: SELECT 1 (must pass) + DELETE FROM users WHERE 1=0 (must fail with permission denied).
-- Broker credentials stored encrypted with Fernet using `BROKER_MASTER_KEY` — same key as Target Capital.
+- Broker credentials stored encrypted with Fernet using `BROKER_ENCRYPTION_KEY` — same key as Target Capital.
 - Error taxonomy: `auth_error` (401), `validation_error` (422), `broker_error` (502), `halted` (503), `not_found` (404).
 
 ## Cross-Repl testing (Target Capital → this engine)
@@ -113,7 +113,7 @@ Set these in Replit Secrets (or Railway env vars / AWS SSM for production):
 |-----|-------------|
 | `DATABASE_URL` | PostgreSQL DSN for **TC's dev/prod DB** with the `tc_exec` scoped user (READ on users/broker_account/trading_signal; INSERT+UPDATE on trade/broker_order). The engine has **no DB of its own**. |
 | `EXECUTION_HMAC_SECRET` | Shared HMAC secret with Target Capital |
-| `BROKER_MASTER_KEY` | Fernet key for broker credential encryption |
+| `BROKER_ENCRYPTION_KEY` | Fernet key for broker credential encryption |
 | `ADMIN_TOKEN` | Protects PUT /v1/halt |
 
 ## User preferences
@@ -134,7 +134,7 @@ and migrates the schema.
 | Table          | Access      | Purpose |
 |----------------|-------------|---------|
 | `"user"`       | READ        | Verify user identity (singular, reserved — must be quoted). Column `active` (not `is_active`). |
-| `user_brokers` | READ        | Broker connection row. `api_key` / `access_token` / `api_secret` are Fernet-encrypted with `BROKER_MASTER_KEY`. For Dhan: `api_key` = client_id, `access_token` = bearer token. |
+| `user_brokers` | READ        | Broker connection row. `api_key` / `access_token` / `api_secret` are Fernet-encrypted with `BROKER_ENCRYPTION_KEY`. For Dhan: `api_key` = client_id, `access_token` = bearer token. |
 | `trading_signal` | READ      | Optional FK from broker_orders.trading_signal_id. |
 | `broker_orders` | INSERT+UPDATE | Where the engine writes orders. Column `broker_account_id` is misleadingly named — it FK's to `user_brokers(id)`, NOT `broker_accounts`. `correlation_id` holds the X-TC-Idempotency value. |
 
@@ -159,7 +159,7 @@ misconfigured DSN is obvious from the logs.
 
 ## Gotchas
 
-- `BROKER_MASTER_KEY` must be a valid Fernet key (base64-encoded 32 bytes). Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+- `BROKER_ENCRYPTION_KEY` must be a valid Fernet key (base64-encoded 32 bytes). Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
 - `EXECUTION_HMAC_SECRET` must match the value in Target Capital exactly.
 - The tc_exec Postgres role must have: READ on `"user"`, `user_brokers`, `trading_signal`; INSERT+UPDATE on `broker_orders`. The startup self-test verifies the no-DELETE-on-"user" side of that.
 - Smoke test: `bash artifacts/tc-execution-engine/tests/smoke.sh` (requires `EXECUTION_HMAC_SECRET` in env and real user/broker_account UUIDs).

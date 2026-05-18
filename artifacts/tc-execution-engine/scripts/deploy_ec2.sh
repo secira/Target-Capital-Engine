@@ -68,12 +68,12 @@ $SSH_CMD bash <<REMOTE
     echo "==> Pulling secrets from SSM…"
     aws ssm get-parameter --name /tc-engine/DATABASE_URL      --with-decryption --query Parameter.Value --output text > .ssm_db_url
     aws ssm get-parameter --name /tc-engine/EXECUTION_HMAC_SECRET --with-decryption --query Parameter.Value --output text > .ssm_hmac
-    aws ssm get-parameter --name /tc-engine/BROKER_MASTER_KEY --with-decryption --query Parameter.Value --output text > .ssm_bmk
+    aws ssm get-parameter --name /tc-engine/BROKER_ENCRYPTION_KEY --with-decryption --query Parameter.Value --output text > .ssm_bmk
     aws ssm get-parameter --name /tc-engine/ADMIN_TOKEN       --with-decryption --query Parameter.Value --output text > .ssm_admin
     cat > .env <<EOF
 DATABASE_URL=\$(cat .ssm_db_url)
 EXECUTION_HMAC_SECRET=\$(cat .ssm_hmac)
-BROKER_MASTER_KEY=\$(cat .ssm_bmk)
+BROKER_ENCRYPTION_KEY=\$(cat .ssm_bmk)
 ADMIN_TOKEN=\$(cat .ssm_admin)
 PORT=8080
 LOG_LEVEL=INFO

@@ -2,7 +2,7 @@
 
 The engine itself is read-only on `user` and `user_brokers`, so we can't
 seed. This script just confirms a known user + user_brokers row exists and
-that its encrypted access_token decrypts cleanly with BROKER_MASTER_KEY.
+that its encrypted access_token decrypts cleanly with BROKER_ENCRYPTION_KEY.
 
 Usage:
 
@@ -13,7 +13,7 @@ Defaults: user_id=27, user_broker_id=48 (TC dev DB known-good row).
 
 Env vars required:
     DATABASE_URL         — tc_exec DSN (READ is enough)
-    BROKER_MASTER_KEY    — Fernet key, must match TC's
+    BROKER_ENCRYPTION_KEY    — Fernet key, must match TC's
 """
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ from shared.models import User, UserBroker
 def main() -> int:
     if not os.environ.get("DATABASE_URL"):
         print("ERROR: DATABASE_URL is not set", file=sys.stderr); return 1
-    if not os.environ.get("BROKER_MASTER_KEY"):
-        print("ERROR: BROKER_MASTER_KEY is not set", file=sys.stderr); return 1
+    if not os.environ.get("BROKER_ENCRYPTION_KEY"):
+        print("ERROR: BROKER_ENCRYPTION_KEY is not set", file=sys.stderr); return 1
 
     user_id = int(sys.argv[1]) if len(sys.argv) > 1 else 27
     user_broker_id = int(sys.argv[2]) if len(sys.argv) > 2 else 48

@@ -11,7 +11,7 @@ Key facts about the TC schema that drove these mappings:
   - The user table is singular, quoted: "user" (reserved word in Postgres).
   - `user_brokers` is the broker connection table. Its `api_key`,
     `access_token`, and `api_secret` columns are Fernet-encrypted text using
-    BROKER_MASTER_KEY. For Dhan, api_key holds the client_id and
+    BROKER_ENCRYPTION_KEY. For Dhan, api_key holds the client_id and
     access_token holds the token.
   - `broker_orders.broker_account_id` is confusingly named: it actually
     references user_brokers(id), NOT broker_accounts(id). TC's

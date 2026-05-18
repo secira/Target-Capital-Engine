@@ -100,7 +100,7 @@ async def get_status(db: Session = Depends(get_db)) -> StatusResponse:
         trade_count_24h=trade_count,
         hmac_secret_set=bool(os.environ.get("EXECUTION_HMAC_SECRET")),
         hmac_next_secret_set=bool(os.environ.get("EXECUTION_HMAC_SECRET_NEXT")),
-        broker_master_key_set=bool(os.environ.get("BROKER_MASTER_KEY")),
+        broker_master_key_set=bool(os.environ.get("BROKER_ENCRYPTION_KEY")),
         admin_token_set=bool(os.environ.get("ADMIN_TOKEN")),
     )
 
