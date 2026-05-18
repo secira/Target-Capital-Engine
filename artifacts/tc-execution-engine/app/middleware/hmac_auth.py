@@ -71,7 +71,13 @@ async def verify_hmac(
     Returns the request_id for downstream use.
     Raises HTTP 401 on any failure.
     """
-    request.state.request_id = x_tc_request_id or ""
+    # Preserve the request_id that request_id_middleware already assigned
+    # (it auto-generates an "auto-…" id when the caller didn't send one).
+    # Only overwrite if the caller actually sent X-TC-Request-ID.
+    if x_tc_request_id:
+        request.state.request_id = x_tc_request_id
+    else:
+        x_tc_request_id = getattr(request.state, "request_id", "") or ""
 
     # 1. Validate timestamp freshness
     try:
@@ -114,5 +120,11 @@ async def verify_hmac(
         logger.warning("HMAC reject — signature mismatch request_id=%s", x_tc_request_id)
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    logger.debug("HMAC OK request_id=%s timestamp=%s", x_tc_request_id, x_tc_timestamp)
+    # Promoted to INFO so we get a visible accept/reject pair per request at
+    # the default LOG_LEVEL=INFO. Body length helps detect signing-window
+    # vs payload-size issues at a glance.
+    logger.info(
+        "HMAC OK request_id=%s timestamp=%s body_len=%d",
+        x_tc_request_id, x_tc_timestamp, len(raw_body),
+    )
     return x_tc_request_id

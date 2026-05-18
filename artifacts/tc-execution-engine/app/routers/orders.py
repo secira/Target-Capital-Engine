@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.middleware.hmac_auth import verify_hmac
 from app.middleware.idempotency import IdempotencyCache, get_idempotency_cache
 from app.routers.health import is_halted
-from shared.brokers import get_executor
+from shared.brokers import UnsupportedBrokerError, get_executor
 from shared.crypto import decrypt
 from shared.db import get_db
 from shared.models import BrokerOrder, User, UserBroker
@@ -96,8 +96,16 @@ def _resolve_broker_creds(ub: UserBroker) -> tuple[str, str, str]:
         client_id = decrypt(ub.api_key) if ub.api_key else ""
         access_token = decrypt(ub.access_token) if ub.access_token else ""
     except Exception as exc:
-        logger.error("Failed to decrypt broker credentials: %s", exc)
-        raise HTTPException(status_code=500, detail="Failed to decrypt broker credentials")
+        # Full traceback — InvalidToken has empty str(), so without exc_info
+        # this log was useless. Now we get the chained "tried N keys" message.
+        logger.exception(
+            "Failed to decrypt broker credentials user_broker_id=%s broker_type=%s",
+            ub.id, broker_type,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"crypto_error: failed to decrypt credentials for user_broker_id={ub.id}: {exc}",
+        )
     if not client_id or not access_token:
         raise HTTPException(
             status_code=500, detail="user_broker is missing api_key or access_token"
@@ -135,9 +143,17 @@ async def place_order(
 ) -> Any:
     prefix = _log_prefix(request_id)
 
+    logger.info(
+        "%s place_order ENTER user_id=%s user_broker_id=%s symbol=%s exchange=%s "
+        "side=%s qty=%s order_type=%s product=%s price=%s idem=%r",
+        prefix, body.user_id, body.user_broker_id, body.symbol, body.exchange,
+        body.transaction_type, body.quantity, body.order_type, body.product_type,
+        body.price, x_tc_idempotency,
+    )
+
     # 1. Halt check
     if is_halted():
-        logger.info("%s Order rejected — engine halted", prefix)
+        logger.warning("%s place_order REJECTED — engine halted", prefix)
         raise HTTPException(status_code=503, detail="halted")
 
     # 2. Idempotency. Key is SCOPED by (user_id, user_broker_id, X-TC-Idempotency)
@@ -259,16 +275,25 @@ async def place_order(
     try:
         executor = get_executor(broker_type, client_id, access_token)
         result = executor.place_order(order_params)
-    except NotImplementedError as exc:
+    except UnsupportedBrokerError as exc:
+        logger.warning("%s place_order REJECTED — unsupported broker: %s", prefix, exc)
         bo.order_status = "REJECTED"
-        bo.status_message = str(exc)[:200]   # broker_orders.status_message is varchar(200)
+        bo.status_message = f"unsupported_broker: {exc}"[:200]
+        bo.last_updated = datetime.datetime.utcnow()
+        db.commit()
+        raise HTTPException(status_code=422, detail=f"unsupported_broker: {exc}")
+    except NotImplementedError as exc:
+        logger.warning("%s place_order REJECTED — stub broker hit: %s", prefix, exc)
+        bo.order_status = "REJECTED"
+        bo.status_message = str(exc)[:200]
         bo.last_updated = datetime.datetime.utcnow()
         db.commit()
         raise HTTPException(status_code=501, detail=str(exc))
     except Exception as exc:
-        logger.error("%s Broker place_order failed: %s", prefix, exc)
+        # Full stack so we can debug a broker SDK failure from the logs alone.
+        logger.exception("%s Broker place_order failed: %s", prefix, exc)
         bo.order_status = "REJECTED"
-        bo.status_message = str(exc)[:200]   # broker_orders.status_message is varchar(200)
+        bo.status_message = str(exc)[:200]
         bo.last_updated = datetime.datetime.utcnow()
         db.commit()
         raise HTTPException(status_code=502, detail=f"broker_error: {exc}")
@@ -330,14 +355,23 @@ async def cancel_order(
             detail="order has no broker_order_id yet — nothing to cancel at the broker",
         )
 
+    logger.info(
+        "%s cancel_order ENTER order_id=%s broker_order_id=%s user_id=%s user_broker_id=%s",
+        prefix, order_id, bo.broker_order_id, body.user_id, body.user_broker_id,
+    )
+
     broker_type, client_id, access_token = _resolve_broker_creds(ub)
     try:
         executor = get_executor(broker_type, client_id, access_token)
         result = executor.cancel_order(bo.broker_order_id)
+    except UnsupportedBrokerError as exc:
+        logger.warning("%s cancel_order REJECTED — unsupported broker: %s", prefix, exc)
+        raise HTTPException(status_code=422, detail=f"unsupported_broker: {exc}")
     except NotImplementedError as exc:
+        logger.warning("%s cancel_order REJECTED — stub broker hit: %s", prefix, exc)
         raise HTTPException(status_code=501, detail=str(exc))
     except Exception as exc:
-        logger.error("%s Broker cancel_order failed: %s", prefix, exc)
+        logger.exception("%s Broker cancel_order failed: %s", prefix, exc)
         raise HTTPException(status_code=502, detail=f"broker_error: {exc}")
 
     bo.order_status = "CANCELLED"
@@ -386,14 +420,23 @@ async def get_order(
     if ub is None:
         raise HTTPException(status_code=500, detail="order has no associated user_broker")
 
+    logger.info(
+        "%s get_order ENTER order_id=%s broker_order_id=%s",
+        prefix, order_id, bo.broker_order_id,
+    )
+
     broker_type, client_id, access_token = _resolve_broker_creds(ub)
     try:
         executor = get_executor(broker_type, client_id, access_token)
         result = executor.get_order_status(bo.broker_order_id)
+    except UnsupportedBrokerError as exc:
+        logger.warning("%s get_order REJECTED — unsupported broker: %s", prefix, exc)
+        raise HTTPException(status_code=422, detail=f"unsupported_broker: {exc}")
     except NotImplementedError as exc:
+        logger.warning("%s get_order REJECTED — stub broker hit: %s", prefix, exc)
         raise HTTPException(status_code=501, detail=str(exc))
     except Exception as exc:
-        logger.error("%s Broker get_order_status failed: %s", prefix, exc)
+        logger.exception("%s Broker get_order_status failed: %s", prefix, exc)
         raise HTTPException(status_code=502, detail=f"broker_error: {exc}")
 
     new_status = (result.get("status") or bo.order_status or "PENDING").upper()

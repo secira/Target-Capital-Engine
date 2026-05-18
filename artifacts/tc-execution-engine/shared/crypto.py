@@ -66,13 +66,20 @@ def encrypt(plaintext: str) -> str:
 def decrypt(token: str) -> str:
     """Try each candidate key until one decrypts the token.
 
-    Raises the last InvalidToken if none of them work.
+    Raises the last InvalidToken if none of them work, with a message that
+    includes how many keys were tried — InvalidToken itself has an empty
+    string repr which is awful to debug.
     """
+    keys = _fernets()
     last_exc: Exception = InvalidToken("no keys available")
-    for f in _fernets():
+    for f in keys:
         try:
             return f.decrypt(token.encode()).decode()
         except InvalidToken as exc:
             last_exc = exc
             continue
-    raise last_exc
+    raise InvalidToken(
+        f"None of the {len(keys)} configured key(s) could decrypt the token. "
+        f"Check that BROKER_ENCRYPTION_KEY matches the value used by Target "
+        f"Capital when the credential was encrypted."
+    ) from last_exc

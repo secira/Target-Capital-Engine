@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -15,6 +17,7 @@ from shared.db import run_startup_self_test
 _STATIC_DIR = Path(__file__).parent / "static"
 
 logger = logging.getLogger(__name__)
+_access_logger = logging.getLogger("tc.access")
 
 
 def create_app() -> FastAPI:
@@ -32,13 +35,36 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
-        request_id = request.headers.get("X-TC-Request-ID", "")
-        # Make request_id available on request.state for dependencies
-        if not hasattr(request.state, "request_id"):
-            request.state.request_id = request_id
-        response = await call_next(request)
-        if request_id:
-            response.headers["X-TC-Request-ID"] = request_id
+        # Always have a request_id, even if the caller didn't send one. Makes
+        # log lines correlatable end-to-end.
+        request_id = request.headers.get("X-TC-Request-ID", "") or f"auto-{uuid.uuid4().hex[:10]}"
+        request.state.request_id = request_id
+
+        start = time.perf_counter()
+        method = request.method
+        path = request.url.path
+        try:
+            response = await call_next(request)
+        except Exception:
+            # Let the global exception handler render the response, but make
+            # sure we log the access line ourselves.
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            _access_logger.exception(
+                "http %s %s -> EXC %.1fms request_id=%s",
+                method, path, elapsed_ms, request_id,
+            )
+            raise
+
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        # /healthz and admin static assets are too chatty for INFO.
+        quiet = path in ("/healthz", "/version") or path.startswith("/admin/static")
+        level = logging.DEBUG if quiet else logging.INFO
+        _access_logger.log(
+            level,
+            "http %s %s -> %d %.1fms request_id=%s",
+            method, path, response.status_code, elapsed_ms, request_id,
+        )
+        response.headers["X-TC-Request-ID"] = request_id
         return response
 
     # ------------------------------------------------------------------
@@ -105,9 +131,17 @@ def create_app() -> FastAPI:
 
 def _setup_logging() -> None:
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    # `force=True` so we beat uvicorn's pre-configured root handler and the
+    # whole engine logs through one consistent formatter.
     logging.basicConfig(
         level=getattr(logging, log_level, logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s request_id=%(request_id)s %(message)s"
-        if False  # custom filter needed — use simple format for now
-        else "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        format="%(asctime)s %(levelname)-7s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        force=True,
     )
+    # Quiet noisy third-party loggers unless we explicitly asked for DEBUG.
+    if log_level != "DEBUG":
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    logger.info("Logging configured at level=%s", log_level)
