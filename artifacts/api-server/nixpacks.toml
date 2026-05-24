@@ -1,0 +1,24 @@
+providers = ["node"]
+
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+nixpkgsArchive = "bc8f8d1be58e8c8383e683a06e1e1e57893fff87"
+
+[phases.install]
+cmds = [
+  "corepack enable",
+  "corepack prepare pnpm@latest --activate",
+  "pnpm install --frozen-lockfile",
+]
+
+[phases.build]
+cmds = [
+  "pnpm --filter @workspace/api-server run build",
+]
+
+[start]
+cmd = "pnpm --filter @workspace/api-server run start"
+
+[variables]
+NODE_ENV = "production"
+NODE_VERSION = "20"

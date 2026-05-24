@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "node",
+  "packages": {
+    "node": "20"
+  },
+  "steps": {
+    "install": {
+      "commands": [
+        "corepack enable",
+        "corepack prepare pnpm@latest --activate",
+        "pnpm install --frozen-lockfile"
+      ]
+    },
+    "build": {
+      "commands": [
+        "pnpm --filter @workspace/api-server run build"
+      ]
+    }
+  },
+  "deploy": {
+    "startCommand": "pnpm --filter @workspace/api-server run start"
+  }
+}
