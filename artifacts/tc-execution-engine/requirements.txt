@@ -9,5 +9,5 @@ pydantic==2.10.3
 pydantic-settings==2.6.1
 requests==2.32.3
 httpx==0.28.0
-dhan-tradehull==2.0.1
+dhanhq==2.0.1
 cachetools==5.5.0

@@ -1,0 +1,107 @@
+╔══════════════════════════════ Nixpacks v1.41.0 ══════════════════════════════╗
+║ setup      │ python311, gcc, postgresql                                      ║
+║──────────────────────────────────────────────────────────────────────────────║
+║ install    │ python -m venv --copies /opt/venv                               ║
+║            │ . /opt/venv/bin/activate && pip install --upgrade pip           ║
+║            │ . /opt/venv/bin/activate && pip install --no-cache-dir -r       ║
+║            │ requirements.txt                                                ║
+║──────────────────────────────────────────────────────────────────────────────║
+║ build      │ pip install --no-cache-dir -r requirements.txt                  ║
+║──────────────────────────────────────────────────────────────────────────────║
+║ start      │ gunicorn main:app -k uvicorn.workers.UvicornWorker --bind       ║
+║            │ 0.0.0.0:$PORT --workers 2 --timeout 60 --graceful-timeout 30    ║
+║            │ --access-logfile - --error-logfile - --log-level info           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+ 
+ 
+Saved output to:
+  snapshot-target-unpack/artifacts/tc-execution-engine
+
+internal
+load build definition from Dockerfile
+0ms
+
+internal
+load metadata for ghcr.io/railwayapp/nixpacks:ubuntu-1745885067
+290ms
+
+internal
+load .dockerignore
+1ms
+SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ARG "ADMIN_TOKEN") (line 11)(https://docs.docker.com/go/dockerfile/rule/secrets-used-in-arg-or-env/)
+ details: Sensitive data should not be used in the ARG or ENV commands
+SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ARG "BROKER_ENCRYPTION_KEY") (line 11)(https://docs.docker.com/go/dockerfile/rule/secrets-used-in-arg-or-env/)
+ details: Sensitive data should not be used in the ARG or ENV commands
+SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ARG "EXECUTION_HMAC_SECRET") (line 11)(https://docs.docker.com/go/dockerfile/rule/secrets-used-in-arg-or-env/)
+ details: Sensitive data should not be used in the ARG or ENV commands
+SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ENV "ADMIN_TOKEN") (line 12)(https://docs.docker.com/go/dockerfile/rule/secrets-used-in-arg-or-env/)
+ details: Sensitive data should not be used in the ARG or ENV commands
+SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ENV "BROKER_ENCRYPTION_KEY") (line 12)(https://docs.docker.com/go/dockerfile/rule/secrets-used-in-arg-or-env/)
+ details: Sensitive data should not be used in the ARG or ENV commands
+SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ENV "EXECUTION_HMAC_SECRET") (line 12)(https://docs.docker.com/go/dockerfile/rule/secrets-used-in-arg-or-env/)
+ details: Sensitive data should not be used in the ARG or ENV commands
+UndefinedVar: Usage of undefined variable '$NIXPACKS_PATH' (line 18)(https://docs.docker.com/go/dockerfile/rule/undefined-var/)
+ details: Variables should be defined before their use
+
+internal
+load build context
+0ms
+
+stage-0
+FROM ghcr.io/railwayapp/nixpacks:ubuntu-1745885067@sha256:d45c89d80e13d7ad0fd555b5130f22a866d9dd10e861f589932303ef2314c7de
+76ms
+
+stage-0
+WORKDIR /app/ cached
+0ms
+
+stage-0
+COPY .nixpacks/nixpkgs-bc8f8d1be58e8c8383e683a06e1e1e57893fff87.nix .nixpacks/nixpkgs-bc8f8d1be58e8c8383e683a06e1e1e57893fff87.nix
+4s
+
+stage-0
+RUN nix-env -if .nixpacks/nixpkgs-bc8f8d1be58e8c8383e683a06e1e1e57893fff87.nix && nix-collect-garbage -d
+45s
+23 store paths deleted, 245.07 MiB freed
+
+stage-0
+COPY . /app/.
+1s
+
+stage-0
+RUN python -m venv --copies /opt/venv
+9s
+
+stage-0
+RUN . /opt/venv/bin/activate && pip install --upgrade pip
+4s
+Successfully installed pip-26.1.1
+
+stage-0
+RUN . /opt/venv/bin/activate && pip install --no-cache-dir -r requirements.txt
+2s
+Collecting fastapi==0.115.5 (from -r requirements.txt (line 1))
+  Downloading fastapi-0.115.5-py3-none-any.whl.metadata (27 kB)
+Collecting uvicorn==0.32.1 (from uvicorn[standard]==0.32.1->-r requirements.txt (line 2))
+  Downloading uvicorn-0.32.1-py3-none-any.whl.metadata (6.6 kB)
+Collecting gunicorn==23.0.0 (from -r requirements.txt (line 3))
+  Downloading gunicorn-23.0.0-py3-none-any.whl.metadata (4.4 kB)
+Collecting sqlalchemy==2.0.36 (from -r requirements.txt (line 4))
+  Downloading SQLAlchemy-2.0.36-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (9.7 kB)
+Collecting psycopg2-binary==2.9.10 (from -r requirements.txt (line 5))
+  Downloading psycopg2_binary-2.9.10-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.9 kB)
+Collecting cryptography==43.0.3 (from -r requirements.txt (line 6))
+  Downloading cryptography-43.0.3-cp39-abi3-manylinux_2_28_x86_64.whl.metadata (5.4 kB)
+Collecting python-dotenv==1.0.1 (from -r requirements.txt (line 7))
+  Downloading python_dotenv-1.0.1-py3-none-any.whl.metadata (23 kB)
+Collecting pydantic==2.10.3 (from -r requirements.txt (line 8))
+  Downloading pydantic-2.10.3-py3-none-any.whl.metadata (172 kB)
+Collecting pydantic-settings==2.6.1 (from -r requirements.txt (line 9))
+  Downloading pydantic_settings-2.6.1-py3-none-any.whl.metadata (3.5 kB)
+Collecting requests==2.32.3 (from -r requirements.txt (line 10))
+  Downloading requests-2.32.3-py3-none-any.whl.metadata (4.6 kB)
+Collecting httpx==0.28.0 (from -r requirements.txt (line 11))
+  Downloading httpx-0.28.0-py3-none-any.whl.metadata (7.1 kB)
+ERROR: Could not find a version that satisfies the requirement dhan-tradehull==2.0.1 (from versions: 3.0.1, 3.0.2, 3.0.3, 3.0.4, 3.0.5, 3.0.6, 3.1.0, 3.1.1, 3.1.2, 3.2.0, 3.2.1, 3.2.2, 3.3.0)
+ERROR: No matching distribution found for dhan-tradehull==2.0.1
+Build Failed: build daemon returned an error < failed to solve: process "/bin/bash -ol pipefail -c . /opt/venv/bin/activate && pip install --no-cache-dir -r requirements.txt" did not complete successfully: exit code: 1 >
