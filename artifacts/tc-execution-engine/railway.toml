@@ -1,9 +1,11 @@
 [build]
 builder = "nixpacks"
+buildCommand = "pip install --no-cache-dir -r requirements.txt"
 
 [deploy]
-startCommand = "gunicorn main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --workers 2 --timeout 30 --access-logfile - --error-logfile -"
+startCommand = "gunicorn main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --workers 2 --timeout 60 --graceful-timeout 30 --access-logfile - --error-logfile - --log-level info"
 healthcheckPath = "/healthz"
-healthcheckTimeout = 30
+healthcheckTimeout = 60
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
+numReplicas = 1

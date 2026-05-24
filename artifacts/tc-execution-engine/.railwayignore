@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+*.log
+halt_state.db
+.env
+.env.local
+tests/
+docs/
+scripts/check_test_data.py

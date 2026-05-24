@@ -116,6 +116,51 @@ Set these in Replit Secrets (or Railway env vars / AWS SSM for production):
 | `BROKER_ENCRYPTION_KEY` | Fernet key for broker credential encryption |
 | `ADMIN_TOKEN` | Protects PUT /v1/halt |
 
+## Railway deployment
+
+The engine deploys as its own Railway service inside the Target Capital project.
+
+**Critical service settings** (Railway dashboard → service → Settings):
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| **Root Directory** | `artifacts/tc-execution-engine` | The repo is a pnpm monorepo with a root `pyproject.toml`. Without this, Railpack auto-detects the root and builds the wrong thing with `uv sync`. |
+| **Builder** | `Nixpacks` (NOT Railpack) | Railpack ignores `Procfile` and `railway.toml`. Nixpacks reads our `nixpacks.toml`. |
+| **Watch Paths** | `artifacts/tc-execution-engine/**` | Only redeploy on engine changes. |
+| **Custom Start Command** | *(blank)* | `railway.toml` and `nixpacks.toml` already provide it. |
+| **Healthcheck Path** | `/healthz` | Verified by `railway.toml`. |
+| **Public Networking** | OFF | Engine is reachable only via TC's `api-server` proxy on the private network. |
+
+**Build config files** (already in the repo, no manual setup needed):
+
+- `artifacts/tc-execution-engine/nixpacks.toml` — pins Python 3.11, installs `requirements.txt`, sets the gunicorn start command.
+- `artifacts/tc-execution-engine/railway.toml` — healthcheck, restart policy, start command (backup for Nixpacks).
+- `artifacts/tc-execution-engine/.python-version` and `runtime.txt` — runtime version hints for any builder.
+- `artifacts/tc-execution-engine/.railwayignore` — excludes tests/docs/cache from the build image.
+
+**Wire TC's api-server to reach the engine over Railway's private network:**
+
+```
+EXEC_ENGINE_URL = http://tc-execution-engine.railway.internal:${{tc-execution-engine.PORT}}
+```
+
+This keeps the HMAC-signed traffic on Railway's internal mesh — no public domain, no TLS overhead.
+
+**Verifying a successful deploy** — the runtime logs should show:
+
+```
+[INFO] Starting gunicorn 23.0.0
+[INFO] Listening at: http://0.0.0.0:<port>
+… INFO [app.main] tc-execution-engine starting up…
+… INFO [shared.db] DB self-test [SELECT 1]: PASSED
+… INFO [shared.db] DB self-test [DELETE blocked]: PASSED (insufficient_privilege)
+… INFO Application startup complete.
+```
+
+If the DB self-test shows DELETE succeeded, the role is too privileged — fix the
+GRANTs before going live. Do **not** set `TC_EXEC_ALLOW_UNSCOPED_DB=1` in
+production; that's a dev-only escape hatch.
+
 ## User preferences
 
 - Python 3.11 FastAPI service
