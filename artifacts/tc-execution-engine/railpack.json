@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "python",
+  "packages": {
+    "python": "3.11"
+  },
+  "steps": {
+    "install": {
+      "commands": [
+        "python -m venv /opt/venv",
+        ". /opt/venv/bin/activate && pip install --upgrade pip",
+        ". /opt/venv/bin/activate && pip install --no-cache-dir -r requirements.txt"
+      ]
+    }
+  },
+  "deploy": {
+    "startCommand": "gunicorn main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --workers 2 --timeout 60 --graceful-timeout 30 --access-logfile - --error-logfile - --log-level info",
+    "paths": ["/opt/venv/bin"]
+  }
+}
