@@ -394,6 +394,8 @@ async def cancel_order(
 @router.get("/{order_id}", response_model=OrderStatusResponse)
 async def get_order(
     order_id: int,
+    user_id: int,
+    user_broker_id: int,
     request_id: Annotated[str, Depends(verify_hmac)],
     db: Session = Depends(get_db),
 ) -> Any:
@@ -403,6 +405,20 @@ async def get_order(
     if not bo:
         raise HTTPException(
             status_code=404, detail=f"order_not_found: no broker_orders row with id={order_id}"
+        )
+
+    # Authorization: the caller must own this order.
+    # Mirrors the same check in cancel_order.
+    if bo.broker_account_id != user_broker_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"order_broker_mismatch: order {order_id} does not belong to user_broker {user_broker_id}",
+        )
+    ub = bo.user_broker
+    if ub is None or ub.user_id != user_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"order_owner_mismatch: order {order_id} does not belong to user {user_id}",
         )
 
     if not bo.broker_order_id:
@@ -416,13 +432,9 @@ async def get_order(
             broker_raw={},
         )
 
-    ub = bo.user_broker
-    if ub is None:
-        raise HTTPException(status_code=500, detail="order has no associated user_broker")
-
     logger.info(
-        "%s get_order ENTER order_id=%s broker_order_id=%s",
-        prefix, order_id, bo.broker_order_id,
+        "%s get_order ENTER order_id=%s broker_order_id=%s user_id=%s user_broker_id=%s",
+        prefix, order_id, bo.broker_order_id, user_id, user_broker_id,
     )
 
     broker_type, client_id, access_token = _resolve_broker_creds(ub)
