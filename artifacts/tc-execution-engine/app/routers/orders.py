@@ -15,6 +15,32 @@ import json
 import logging
 from typing import Annotated, Any
 
+
+# ---------------------------------------------------------------------------
+# Helpers — time + safe message truncation
+# ---------------------------------------------------------------------------
+
+def _utcnow() -> datetime.datetime:
+    """Return a timezone-naive UTC datetime (Bug 7 fix — utcnow() is deprecated in 3.12)."""
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def _safe_status_msg(data: Any, max_len: int = 200) -> str:
+    """Serialise *data* to JSON, truncating cleanly so the result is always valid (Bug 10 fix).
+
+    If the full JSON fits in max_len, it is returned as-is.
+    Otherwise returns a compact sentinel object so callers parsing the column
+    programmatically always get valid JSON rather than a mid-token substring.
+    """
+    try:
+        full = json.dumps(data, separators=(",", ":"))
+    except Exception:
+        full = str(data)
+    if len(full) <= max_len:
+        return full
+    preview = full[: max_len - 30]
+    return json.dumps({"truncated": True, "preview": preview}, separators=(",", ":"))
+
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -216,7 +242,7 @@ async def place_order(
 
     # 5. INSERT broker_orders row (status=PENDING) so we have an id before
     #    calling the broker. If the broker call fails we UPDATE status=REJECTED.
-    now = datetime.datetime.utcnow()
+    now = _utcnow()
     trading_symbol = body.trading_symbol or body.symbol
     bo = BrokerOrder(
         broker_account_id=ub.id,                     # FK → user_brokers.id
@@ -278,15 +304,15 @@ async def place_order(
     except UnsupportedBrokerError as exc:
         logger.warning("%s place_order REJECTED — unsupported broker: %s", prefix, exc)
         bo.order_status = "REJECTED"
-        bo.status_message = f"unsupported_broker: {exc}"[:200]
-        bo.last_updated = datetime.datetime.utcnow()
+        bo.status_message = str(exc)[:200]
+        bo.last_updated = _utcnow()
         db.commit()
         raise HTTPException(status_code=422, detail=f"unsupported_broker: {exc}")
     except NotImplementedError as exc:
         logger.warning("%s place_order REJECTED — stub broker hit: %s", prefix, exc)
         bo.order_status = "REJECTED"
         bo.status_message = str(exc)[:200]
-        bo.last_updated = datetime.datetime.utcnow()
+        bo.last_updated = _utcnow()
         db.commit()
         raise HTTPException(status_code=501, detail=str(exc))
     except Exception as exc:
@@ -294,14 +320,14 @@ async def place_order(
         logger.exception("%s Broker place_order failed: %s", prefix, exc)
         bo.order_status = "REJECTED"
         bo.status_message = str(exc)[:200]
-        bo.last_updated = datetime.datetime.utcnow()
+        bo.last_updated = _utcnow()
         db.commit()
         raise HTTPException(status_code=502, detail=f"broker_error: {exc}")
 
     # 7. Update the row with the broker's order id + accepted status
     bo.broker_order_id = str(result.get("broker_order_id", ""))
     bo.order_status = (result.get("status") or "PENDING").upper()
-    bo.last_updated = datetime.datetime.utcnow()
+    bo.last_updated = _utcnow()
     db.commit()
     db.refresh(bo)
 
@@ -375,8 +401,8 @@ async def cancel_order(
         raise HTTPException(status_code=502, detail=f"broker_error: {exc}")
 
     bo.order_status = "CANCELLED"
-    bo.status_message = json.dumps(result.get("raw", {}))[:200]
-    bo.last_updated = datetime.datetime.utcnow()
+    bo.status_message = _safe_status_msg(result.get("raw", {}))
+    bo.last_updated = _utcnow()
     db.commit()
     db.refresh(bo)
 
@@ -452,9 +478,16 @@ async def get_order(
         raise HTTPException(status_code=502, detail=f"broker_error: {exc}")
 
     new_status = (result.get("status") or bo.order_status or "PENDING").upper()
+    # Bug 6 fix: update fill data from the live broker response, not the stale DB value.
+    new_filled_qty = result.get("filled_qty")
+    new_avg_price = result.get("avg_price")
+    if new_filled_qty is not None:
+        bo.filled_quantity = int(new_filled_qty)
+    if new_avg_price is not None:
+        bo.avg_execution_price = float(new_avg_price)
     bo.order_status = new_status
-    bo.status_message = json.dumps(result.get("raw", {}))[:200]
-    bo.last_updated = datetime.datetime.utcnow()
+    bo.status_message = _safe_status_msg(result.get("raw", {}))
+    bo.last_updated = _utcnow()
     db.commit()
 
     return OrderStatusResponse(

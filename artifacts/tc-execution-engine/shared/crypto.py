@@ -17,11 +17,20 @@ from __future__ import annotations
 
 import base64
 import os
-from typing import List
+import threading
+from typing import List, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
 
 _LEGACY_DEV_SEED = b"Target Capital_Dev_Key_32_Chars_Long_123="
+
+# ---------------------------------------------------------------------------
+# Fernet singleton cache (Bug 5 fix)
+# Building Fernet instances requires key validation work. Env vars don't
+# change at runtime, so we build once and reuse on every decrypt() call.
+# ---------------------------------------------------------------------------
+_fernet_lock = threading.Lock()
+_fernet_cache: Optional[List[Fernet]] = None
 
 
 def _candidate_keys() -> List[bytes]:
@@ -44,7 +53,7 @@ def _candidate_keys() -> List[bytes]:
     return keys
 
 
-def _fernets() -> List[Fernet]:
+def _build_fernets() -> List[Fernet]:
     out: List[Fernet] = []
     for k in _candidate_keys():
         try:
@@ -56,6 +65,18 @@ def _fernets() -> List[Fernet]:
             "No usable Fernet key found. Set BROKER_ENCRYPTION_KEY to TC's master key."
         )
     return out
+
+
+def _fernets() -> List[Fernet]:
+    """Return cached Fernet instances, building them once on first call."""
+    global _fernet_cache
+    if _fernet_cache is not None:
+        return _fernet_cache
+    with _fernet_lock:
+        if _fernet_cache is not None:   # double-checked under lock
+            return _fernet_cache
+        _fernet_cache = _build_fernets()
+        return _fernet_cache
 
 
 def encrypt(plaintext: str) -> str:

@@ -5,6 +5,7 @@ import logging
 import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -20,6 +21,39 @@ logger = logging.getLogger(__name__)
 _access_logger = logging.getLogger("tc.access")
 
 
+def _check_required_secrets() -> None:
+    """Refuse to start if any critical env var is missing (Bug 9 fix).
+
+    Failing fast at startup surfaces misconfiguration immediately — the Railway
+    deploy log shows a clear error — rather than on the first real request.
+    """
+    required = {
+        "EXECUTION_HMAC_SECRET": "HMAC signing secret shared with Target Capital",
+        "BROKER_ENCRYPTION_KEY": "Fernet key for broker credential encryption",
+        "ADMIN_TOKEN": "Admin dashboard / halt-switch token",
+    }
+    missing = [f"{k} ({desc})" for k, desc in required.items() if not os.environ.get(k)]
+    if missing:
+        msg = "Startup aborted — required env vars not set:\n  " + "\n  ".join(missing)
+        logger.critical(msg)
+        raise RuntimeError(msg)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """FastAPI lifespan — replaces deprecated @app.on_event (Bug 8 fix)."""
+    _setup_logging()
+    logger.info("tc-execution-engine starting up…")
+    _check_required_secrets()
+    db_url = os.environ.get("DATABASE_URL", "")
+    if db_url:
+        run_startup_self_test()
+    else:
+        logger.warning("DATABASE_URL not set — skipping DB self-test (dev only)")
+    yield
+    logger.info("tc-execution-engine shutting down")
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="tc-execution-engine",
@@ -27,6 +61,7 @@ def create_app() -> FastAPI:
         version="1.0.0",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=_lifespan,
     )
 
     # ------------------------------------------------------------------
@@ -105,26 +140,6 @@ def create_app() -> FastAPI:
 
     if _STATIC_DIR.exists():
         app.mount("/admin/static", StaticFiles(directory=_STATIC_DIR), name="admin-static")
-
-    # ------------------------------------------------------------------
-    # Startup / shutdown events
-    # ------------------------------------------------------------------
-
-    @app.on_event("startup")
-    async def on_startup() -> None:
-        _setup_logging()
-        logger.info("tc-execution-engine starting up…")
-        db_url = os.environ.get("DATABASE_URL", "")
-        if db_url:
-            # Hard-fail: if self-test raises, the exception propagates and
-            # uvicorn/gunicorn will exit — engine does not accept traffic.
-            run_startup_self_test()
-        else:
-            logger.warning("DATABASE_URL not set — skipping DB self-test (dev only)")
-
-    @app.on_event("shutdown")
-    async def on_shutdown() -> None:
-        logger.info("tc-execution-engine shutting down")
 
     return app
 

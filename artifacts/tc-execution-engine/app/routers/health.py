@@ -10,9 +10,12 @@ restarts without needing a separate Redis/Postgres write.
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import sqlite3
+import threading
+import time as _time
 
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import JSONResponse
@@ -22,6 +25,15 @@ from shared.schemas import HaltState, SetHaltRequest
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# Halt-state in-memory cache (Bug 4 fix)
+# Re-reads SQLite at most once per second instead of on every order.
+# ---------------------------------------------------------------------------
+_halt_cache_lock = threading.Lock()
+_halt_cache_value: bool = False
+_halt_cache_expires: float = 0.0
+_HALT_CACHE_TTL: float = 1.0
 
 # ---------------------------------------------------------------------------
 # Git SHA
@@ -108,15 +120,37 @@ async def set_halt(
     admin_token = os.environ.get("ADMIN_TOKEN", "")
     if not admin_token:
         raise HTTPException(status_code=500, detail="ADMIN_TOKEN not configured")
-    if x_tc_admin_token != admin_token:
+    if not hmac.compare_digest(x_tc_admin_token, admin_token):
         raise HTTPException(status_code=401, detail="Invalid admin token")
 
     state = HaltState(halted=body.halted, reason=body.reason)
     _write_halt(state)
+    _invalidate_halt_cache()
     logger.info("Halt state set to %s reason=%r", state.halted, state.reason)
     return state
 
 
 def is_halted() -> bool:
-    """Check current halt state — called by order router before broker calls."""
-    return _read_halt().halted
+    """Check current halt state — called by order router before broker calls.
+
+    Reads SQLite at most once per second; between reads the cached boolean is
+    returned without any I/O (Bug 4 fix).
+    """
+    global _halt_cache_value, _halt_cache_expires
+    now = _time.monotonic()
+    if now < _halt_cache_expires:
+        return _halt_cache_value
+    with _halt_cache_lock:
+        if now < _halt_cache_expires:   # double-checked under lock
+            return _halt_cache_value
+        state = _read_halt()
+        _halt_cache_value = state.halted
+        _halt_cache_expires = now + _HALT_CACHE_TTL
+        return _halt_cache_value
+
+
+def _invalidate_halt_cache() -> None:
+    """Force the next is_halted() call to re-read SQLite (called after a write)."""
+    global _halt_cache_expires
+    with _halt_cache_lock:
+        _halt_cache_expires = 0.0

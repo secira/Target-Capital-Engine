@@ -190,12 +190,17 @@ class DhanExecutor(BrokerExecutor):
             raise RuntimeError(f"Dhan get_order_status failed: {resp}")
         data = resp.get("data") or {}
         status = data.get("orderStatus", "UNKNOWN")
+        filled_qty = data.get("filledQty") or data.get("filled_qty") or 0
+        avg_price = data.get("averageTradedPrice") or data.get("avg_price") or 0.0
         logger.info(
-            "Dhan get_order_status response client_id=%s broker_order_id=%s status=%s",
-            _mask(self.client_id), broker_order_id, status,
+            "Dhan get_order_status response client_id=%s broker_order_id=%s "
+            "status=%s filled_qty=%s avg_price=%s",
+            _mask(self.client_id), broker_order_id, status, filled_qty, avg_price,
         )
         return {
             "broker_order_id": broker_order_id,
             "status": status,
+            "filled_qty": int(filled_qty),
+            "avg_price": float(avg_price),
             "raw": resp,
         }
