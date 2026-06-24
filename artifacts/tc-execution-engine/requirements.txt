@@ -10,4 +10,7 @@ pydantic-settings==2.6.1
 requests==2.32.3
 httpx==0.28.0
 dhanhq==2.0.1
+kiteconnect==5.2.0
+smartapi-python==1.5.5
+alice-blue==2.0.4
 cachetools==5.5.0

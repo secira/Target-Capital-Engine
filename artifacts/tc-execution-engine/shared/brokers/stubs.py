@@ -1,9 +1,9 @@
-"""Stub broker executors for Zerodha, Angel, and Upstox.
+"""Stub broker executors — brokers not yet fully implemented.
 
-Phase 1: raise NotImplementedError so the factory correctly signals that these
-brokers are not yet supported.  Replace each class body when adding a real
-integration.
+Currently stubbed:
+  - Upstox (Phase 2)
 
+Replace the class body with a real integration when adding support.
 Every stub method logs a WARNING so an attempt to use an unsupported broker
 shows up clearly in production logs instead of being a silent 501.
 """
@@ -23,34 +23,8 @@ def _not_implemented(broker: str, method: str) -> "NotImplementedError":
     return NotImplementedError(msg)
 
 
-class ZerodhaExecutor(BrokerExecutor):
-    """Zerodha (Kite) — stub, not yet implemented."""
-
-    def place_order(self, order_params: dict[str, Any]) -> dict[str, Any]:
-        raise _not_implemented("Zerodha", "place_order")
-
-    def cancel_order(self, broker_order_id: str) -> dict[str, Any]:
-        raise _not_implemented("Zerodha", "cancel_order")
-
-    def get_order_status(self, broker_order_id: str) -> dict[str, Any]:
-        raise _not_implemented("Zerodha", "get_order_status")
-
-
-class AngelExecutor(BrokerExecutor):
-    """Angel One (SmartAPI) — stub, not yet implemented."""
-
-    def place_order(self, order_params: dict[str, Any]) -> dict[str, Any]:
-        raise _not_implemented("Angel", "place_order")
-
-    def cancel_order(self, broker_order_id: str) -> dict[str, Any]:
-        raise _not_implemented("Angel", "cancel_order")
-
-    def get_order_status(self, broker_order_id: str) -> dict[str, Any]:
-        raise _not_implemented("Angel", "get_order_status")
-
-
 class UpstoxExecutor(BrokerExecutor):
-    """Upstox — stub, not yet implemented."""
+    """Upstox — stub, not yet implemented (Phase 2)."""
 
     def place_order(self, order_params: dict[str, Any]) -> dict[str, Any]:
         raise _not_implemented("Upstox", "place_order")

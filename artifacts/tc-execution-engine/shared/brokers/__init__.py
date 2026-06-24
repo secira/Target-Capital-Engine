@@ -8,8 +8,11 @@ from shared.brokers.base import (
     BrokerRejectedError,
     BrokerUnknownStateError,
 )
+from shared.brokers.aliceblue import AlicebluExecutor
+from shared.brokers.angel import AngelExecutor
 from shared.brokers.dhan import DhanExecutor
-from shared.brokers.stubs import AngelExecutor, UpstoxExecutor, ZerodhaExecutor
+from shared.brokers.stubs import UpstoxExecutor
+from shared.brokers.zerodha import ZerodhaExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +20,14 @@ logger = logging.getLogger(__name__)
 _REGISTRY: dict[str, type[BrokerExecutor]] = {
     "dhan": DhanExecutor,
     "zerodha": ZerodhaExecutor,
+    "kite": ZerodhaExecutor,           # alternate spellings
     "angel": AngelExecutor,
-    "angelone": AngelExecutor,        # tolerate alternate spellings
-    "upstox": UpstoxExecutor,
+    "angelone": AngelExecutor,
+    "smartapi": AngelExecutor,
+    "aliceblue": AlicebluExecutor,
+    "alice_blue": AlicebluExecutor,
+    "alice": AlicebluExecutor,
+    "upstox": UpstoxExecutor,          # still stubbed
 }
 
 
