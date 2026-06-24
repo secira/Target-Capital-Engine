@@ -55,16 +55,40 @@ class PlaceOrderRequest(BaseModel):
     tag: str = Field(default="", max_length=40)
     tenant_id: str = Field(default="live", max_length=40)
 
+    # --- Optional inline broker credentials (PREFERRED over the DB copy) -----
+    # When the caller (TC) supplies already-decrypted, freshly-rotated
+    # credentials here, the engine uses them directly and does NOT read the
+    # encrypted copy on user_brokers. This removes the stale-token DH-901 class
+    # of failure entirely. When omitted, the engine falls back to decrypting
+    # the user_brokers row (requires BROKER_ENCRYPTION_KEY).
+    #
+    # SECURITY: access_token is a LIVE trading credential. `repr=False` keeps
+    # these out of any accidental model repr / log line, and the raw request
+    # body must never be logged. They are used transiently and never persisted.
+    broker_type: Optional[str] = Field(default=None, max_length=20)
+    client_id: Optional[str] = Field(default=None, max_length=64, repr=False)
+    api_key: Optional[str] = Field(default=None, max_length=64, repr=False)
+    access_token: Optional[str] = Field(default=None, repr=False)
+
 
 class CancelOrderRequest(BaseModel):
     """POST /v1/orders/{order_id}/cancel body.
 
     user_id + user_broker_id are required so the engine can verify the cancel
     request actually originates from the owner of the order.
+
+    Optional inline credentials follow the same precedence as PlaceOrderRequest:
+    if supplied they are used directly; otherwise the engine decrypts the
+    user_brokers row. SECURITY: access_token is a live credential — repr=False,
+    never log the body.
     """
 
     user_id: int
     user_broker_id: int
+    broker_type: Optional[str] = Field(default=None, max_length=20)
+    client_id: Optional[str] = Field(default=None, max_length=64, repr=False)
+    api_key: Optional[str] = Field(default=None, max_length=64, repr=False)
+    access_token: Optional[str] = Field(default=None, repr=False)
 
 
 # ---------------------------------------------------------------------------

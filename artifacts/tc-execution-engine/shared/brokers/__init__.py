@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import logging
 
-from shared.brokers.base import BrokerExecutor
+from shared.brokers.base import (
+    BrokerExecutor,
+    BrokerRejectedError,
+    BrokerUnknownStateError,
+)
 from shared.brokers.dhan import DhanExecutor
 from shared.brokers.stubs import AngelExecutor, UpstoxExecutor, ZerodhaExecutor
 
@@ -73,6 +77,8 @@ def _mask(s: str, keep: int = 4) -> str:
 __all__ = [
     "BrokerExecutor",
     "UnsupportedBrokerError",
+    "BrokerRejectedError",
+    "BrokerUnknownStateError",
     "get_executor",
     "supported_brokers",
 ]

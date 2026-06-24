@@ -42,13 +42,19 @@ def _safe_status_msg(data: Any, max_len: int = 200) -> str:
     return json.dumps({"truncated": True, "preview": preview}, separators=(",", ":"))
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.middleware.hmac_auth import verify_hmac
 from app.middleware.idempotency import IdempotencyCache, get_idempotency_cache
 from app.routers.health import is_halted
-from shared.brokers import UnsupportedBrokerError, get_executor
+from shared.brokers import (
+    BrokerRejectedError,
+    BrokerUnknownStateError,
+    UnsupportedBrokerError,
+    get_executor,
+)
 from shared.crypto import decrypt
 from shared.db import get_db
 from shared.models import BrokerOrder, User, UserBroker
@@ -107,17 +113,40 @@ def _fetch_user_broker_or_404(
     return ub
 
 
-def _resolve_broker_creds(ub: UserBroker) -> tuple[str, str, str]:
-    """Decrypt the credentials needed to talk to the broker.
+def _resolve_broker_creds(
+    ub: UserBroker,
+    *,
+    inline_broker_type: str | None = None,
+    inline_client_id: str | None = None,
+    inline_access_token: str | None = None,
+) -> tuple[str, str, str]:
+    """Resolve (broker_type, client_id, access_token) for the broker call.
 
-    Returns (broker_type, client_id, access_token).
+    Credential precedence:
+      1. Inline credentials supplied by the caller (TC) in the request body.
+         These are already decrypted and freshly rotated, so preferring them
+         means a stale encrypted copy on user_brokers can never cause DH-901.
+         Both client_id and access_token must be present to take this path.
+      2. Otherwise, decrypt the Fernet-encrypted copy on the user_brokers row
+         (requires BROKER_ENCRYPTION_KEY).
 
     For Dhan: client_id is stored in api_key, access_token in access_token.
-    Both are Fernet-encrypted with BROKER_ENCRYPTION_KEY.
+    broker_type may come from the payload or the row; it is not sensitive.
+    NOTE: never log inline_client_id / inline_access_token — live credentials.
     """
-    broker_type = (ub.broker_type or ub.broker_name or "").lower().strip()
+    broker_type = (
+        (inline_broker_type or ub.broker_type or ub.broker_name or "").lower().strip()
+    )
     if not broker_type:
         raise HTTPException(status_code=500, detail="user_broker has no broker_type")
+
+    # 1. Prefer fresh inline credentials. Require BOTH so we never mix a
+    #    payload client_id with a DB token (or vice-versa). .strip() guards
+    #    against a stray trailing newline making the bearer token malformed.
+    if inline_client_id and inline_access_token:
+        return broker_type, inline_client_id.strip(), inline_access_token.strip()
+
+    # 2. Fall back to the encrypted DB copy.
     try:
         client_id = decrypt(ub.api_key) if ub.api_key else ""
         access_token = decrypt(ub.access_token) if ub.access_token else ""
@@ -134,9 +163,41 @@ def _resolve_broker_creds(ub: UserBroker) -> tuple[str, str, str]:
         )
     if not client_id or not access_token:
         raise HTTPException(
-            status_code=500, detail="user_broker is missing api_key or access_token"
+            status_code=500,
+            detail="no inline credentials supplied and user_broker is missing "
+            "api_key or access_token",
         )
     return broker_type, client_id, access_token
+
+
+def _pending_unknown_response(
+    db: Session,
+    cache: "IdempotencyCache",
+    scoped_key: str,
+    bo: BrokerOrder,
+    broker_type: str,
+    detail: str,
+) -> JSONResponse:
+    """Persist an order whose broker outcome is UNKNOWN as PENDING (flagged for
+    reconciliation) and return HTTP 202.
+
+    Critically this NEVER marks the order REJECTED: a timeout/transport failure
+    may mean the order is actually live at the broker, so discarding it would
+    risk a phantom-fill / double-order on retry. The reconciler resolves the
+    true state later. The response is cached against the idempotency key so a
+    retry returns this same PENDING order rather than placing a new one.
+    """
+    bo.order_status = "PENDING"
+    bo.status_message = _safe_status_msg(
+        {"state": "UNKNOWN", "needs_reconcile": True, "detail": detail[:160]}
+    )
+    bo.last_updated = _utcnow()
+    db.commit()
+    db.refresh(bo)
+    resp = _to_response(bo, broker_type)
+    if scoped_key:
+        cache.set(scoped_key, resp.model_dump())
+    return JSONResponse(status_code=202, content=resp.model_dump())
 
 
 def _to_response(bo: BrokerOrder, broker_type: str) -> OrderResponse:
@@ -176,6 +237,16 @@ async def place_order(
         body.transaction_type, body.quantity, body.order_type, body.product_type,
         body.price, x_tc_idempotency,
     )
+
+    # 0. Idempotency key is MANDATORY for order placement. Without it there is
+    #    no dedup at all — a retry or replay would place a second live order.
+    if not x_tc_idempotency:
+        logger.warning("%s place_order REJECTED — missing X-TC-Idempotency", prefix)
+        raise HTTPException(
+            status_code=400,
+            detail="idempotency_key_required: X-TC-Idempotency header is mandatory "
+            "for order placement",
+        )
 
     # 1. Halt check
     if is_halted():
@@ -238,7 +309,18 @@ async def place_order(
     # 4. Validate user + user_broker (clean 404s, not 500s)
     _fetch_user_or_404(db, body.user_id)
     ub = _fetch_user_broker_or_404(db, body.user_broker_id, body.user_id)
-    broker_type, client_id, access_token = _resolve_broker_creds(ub)
+    broker_type, client_id, access_token = _resolve_broker_creds(
+        ub,
+        inline_broker_type=body.broker_type,
+        inline_client_id=body.client_id or body.api_key,
+        inline_access_token=body.access_token,
+    )
+    logger.info(
+        "%s creds source=%s broker_type=%s",
+        prefix,
+        "payload" if ((body.client_id or body.api_key) and body.access_token) else "db",
+        broker_type,
+    )
 
     # 5. INSERT broker_orders row (status=PENDING) so we have an id before
     #    calling the broker. If the broker call fails we UPDATE status=REJECTED.
@@ -274,13 +356,34 @@ async def place_order(
         db.flush()
     except IntegrityError as exc:
         db.rollback()
-        logger.warning(
-            "%s broker_orders insert IntegrityError: %s",
-            prefix, getattr(exc, "orig", exc),
-        )
+        orig = getattr(exc, "orig", exc)
+        msg = str(orig).lower()
+        # Unique-violation on (broker_account_id, correlation_id) means a
+        # concurrent request already inserted this idempotency key (the race the
+        # in-process cache can't cover cross-worker). Resolve it idempotently by
+        # returning the existing order instead of erroring or double-placing.
+        if "unique" in msg or "duplicate key" in msg or "ux_broker_orders_corr" in msg:
+            existing = (
+                db.query(BrokerOrder)
+                .filter(
+                    BrokerOrder.correlation_id == x_tc_idempotency,
+                    BrokerOrder.broker_account_id == body.user_broker_id,
+                )
+                .first()
+            )
+            if existing is not None:
+                logger.info(
+                    "%s insert race resolved via unique index — returning existing "
+                    "order_id=%s", prefix, existing.id,
+                )
+                resp = _to_response(existing, broker_type)
+                if scoped_key:
+                    cache.set(scoped_key, resp.model_dump())
+                return resp
+        logger.warning("%s broker_orders insert IntegrityError: %s", prefix, orig)
         raise HTTPException(
             status_code=404,
-            detail=f"foreign_key_violation: {getattr(exc, 'orig', exc)}",
+            detail=f"foreign_key_violation: {orig}",
         )
 
     # 6. Place the order with the broker.
@@ -315,14 +418,35 @@ async def place_order(
         bo.last_updated = _utcnow()
         db.commit()
         raise HTTPException(status_code=501, detail=str(exc))
-    except Exception as exc:
-        # Full stack so we can debug a broker SDK failure from the logs alone.
-        logger.exception("%s Broker place_order failed: %s", prefix, exc)
+    except BrokerRejectedError as exc:
+        # Broker DEFINITIVELY rejected — no live order exists, safe to REJECT.
+        logger.warning("%s place_order REJECTED by broker: %s", prefix, exc)
         bo.order_status = "REJECTED"
         bo.status_message = str(exc)[:200]
         bo.last_updated = _utcnow()
         db.commit()
         raise HTTPException(status_code=502, detail=f"broker_error: {exc}")
+    except BrokerUnknownStateError as exc:
+        # Outcome UNKNOWN (timeout / transport). DO NOT reject — the order may
+        # be live at the broker. Leave PENDING + flag for reconciliation.
+        logger.error(
+            "%s place_order UNKNOWN STATE — leaving PENDING for reconciliation: %s",
+            prefix, exc,
+        )
+        return _pending_unknown_response(
+            db, cache, scoped_key, bo, broker_type, str(exc)
+        )
+    except Exception as exc:
+        # Unexpected internal error around the broker call. Bias to UNKNOWN
+        # (PENDING + reconcile) rather than REJECTED so a possibly-live order is
+        # never falsely discarded; the reconciler resolves the true state.
+        logger.exception(
+            "%s place_order unexpected error — leaving PENDING for reconciliation: %s",
+            prefix, exc,
+        )
+        return _pending_unknown_response(
+            db, cache, scoped_key, bo, broker_type, str(exc)
+        )
 
     # 7. Update the row with the broker's order id + accepted status
     bo.broker_order_id = str(result.get("broker_order_id", ""))
@@ -386,7 +510,12 @@ async def cancel_order(
         prefix, order_id, bo.broker_order_id, body.user_id, body.user_broker_id,
     )
 
-    broker_type, client_id, access_token = _resolve_broker_creds(ub)
+    broker_type, client_id, access_token = _resolve_broker_creds(
+        ub,
+        inline_broker_type=body.broker_type,
+        inline_client_id=body.client_id or body.api_key,
+        inline_access_token=body.access_token,
+    )
     try:
         executor = get_executor(broker_type, client_id, access_token)
         result = executor.cancel_order(bo.broker_order_id)
@@ -486,6 +615,12 @@ async def get_order(
     if new_avg_price is not None:
         bo.avg_execution_price = float(new_avg_price)
     bo.order_status = new_status
+    # Keep pending_quantity consistent with the fill (never negative).
+    if bo.quantity is not None:
+        bo.pending_quantity = max(0, int(bo.quantity) - int(bo.filled_quantity or 0))
+    # Stamp execution_time once the order reaches a terminal filled state.
+    if new_status == "COMPLETE" and bo.execution_time is None:
+        bo.execution_time = _utcnow()
     bo.status_message = _safe_status_msg(result.get("raw", {}))
     bo.last_updated = _utcnow()
     db.commit()

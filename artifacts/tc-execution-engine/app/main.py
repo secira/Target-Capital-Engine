@@ -55,12 +55,16 @@ async def _lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    # Interactive API docs publish the full schema; keep them OFF by default and
+    # opt in with ENABLE_DOCS=1 (e.g. in dev) so production doesn't expose them.
+    docs_enabled = os.environ.get("ENABLE_DOCS") == "1"
     app = FastAPI(
         title="tc-execution-engine",
         description="HMAC-signed order execution engine for Target Capital",
         version="1.0.0",
-        docs_url="/docs",
-        redoc_url="/redoc",
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
         lifespan=_lifespan,
     )
 

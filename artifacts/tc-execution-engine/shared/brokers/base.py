@@ -3,6 +3,20 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 
+class BrokerRejectedError(Exception):
+    """The broker DEFINITIVELY rejected the order (it reached the broker and
+    came back as a structured failure). Safe to mark the order REJECTED — no
+    live order exists at the broker."""
+
+
+class BrokerUnknownStateError(Exception):
+    """The broker call did not return a confirmed result — timeout, dropped
+    connection, JSON parse error, etc. The order MAY or MAY NOT have been
+    placed at the broker. The caller MUST NOT assume rejection; the order
+    should be left PENDING and reconciled against the broker before any retry.
+    """
+
+
 class BrokerExecutor(ABC):
     """All broker adapters must implement this interface."""
 
