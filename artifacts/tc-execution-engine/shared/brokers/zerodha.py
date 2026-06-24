@@ -104,6 +104,15 @@ class ZerodhaExecutor(BrokerExecutor):
         trigger_price = float(order_params.get("trigger_price") or 0)
         disclosed_qty = int(order_params.get("disclosed_quantity") or 0)
 
+        # Kite requires market_protection for all MARKET orders submitted via API.
+        # It is the maximum % deviation from LTP that Zerodha will allow before
+        # rejecting the fill.  Default: 1 % — can be overridden in order_params.
+        # Reference: https://kite.trade/docs/connect/v3/orders/#regular-order-parameters
+        market_protection: float | None = None
+        if order_type == "MARKET":
+            raw_mp = order_params.get("market_protection")
+            market_protection = float(raw_mp) if raw_mp is not None else 1.0
+
         sdk_kwargs: dict[str, Any] = dict(
             variety="regular",
             exchange=exchange,
@@ -118,6 +127,8 @@ class ZerodhaExecutor(BrokerExecutor):
             sdk_kwargs["price"] = price
         if trigger_price:
             sdk_kwargs["trigger_price"] = trigger_price
+        if market_protection is not None:
+            sdk_kwargs["market_protection"] = market_protection
         if disclosed_qty:
             sdk_kwargs["disclosed_quantity"] = disclosed_qty
         if order_params.get("tag"):
